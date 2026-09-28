@@ -352,7 +352,7 @@ def setup_generation_context(
     tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
     
     # Set LOCAL_RANK to 0 for single-GPU inference mode
-    # CLI multi-GPU uses CUDA_VISIBLE_DEVICES to restrict visibility per worker
+    # The CLI may restrict visibility to the selected CUDA device before importing torch.
     os.environ.setdefault("LOCAL_RANK", "0")
     
     # Create generation context

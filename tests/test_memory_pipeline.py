@@ -7,6 +7,7 @@ from argparse import Namespace
 from contextlib import closing
 import copy
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -300,7 +301,7 @@ def test_oom_restarts_file_without_publishing_partial_results(tmp_path, monkeypa
             raise torch.cuda.OutOfMemoryError('test OOM after writing')
         return 1
     monkeypatch.setattr(cli, '_write_file_attempt', write)
-    assert cli.process_single_file(str(input_path), options, ['cpu'], str(dest)) == 1
+    assert cli.process_single_file(str(input_path), options, 'cpu', str(dest)) == 1
     assert attempts == [(33, 42, 1080), (16, 42, 1080)]
     assert dest.read_bytes() == b'complete'
 
@@ -364,7 +365,7 @@ def test_failed_file_writer_closes_capture_and_generator(tmp_path, monkeypatch):
         raise OSError('disk full')
     monkeypatch.setattr(cli, 'save_frames_to_video', write)
     with pytest.raises(OSError, match='disk full'):
-        cli._write_file_attempt('input.mp4', str(tmp_path / 'out.mp4'), 'video', options, ['cpu'], None)
+        cli._write_file_attempt('input.mp4', str(tmp_path / 'out.mp4'), 'video', options, 'cpu', None)
     assert cap.closed and closed == [True]
 
 
@@ -414,12 +415,21 @@ def test_full_core_stream_clears_session_context_and_prepend(tmp_path, monkeypat
     assert all(r['ok'] for r in records)
 
 
-def test_worker_errors_reach_parent_as_oom(monkeypatch):
-    from queue import Queue
-    queue = Queue()
-    def worker(*args, **kwargs):
-        raise torch.cuda.OutOfMemoryError('worker allocation')
-    monkeypatch.setattr(cli, '_worker_run', worker)
-    cli._worker_process(2, '0', None, {}, queue, None)
-    index, error = queue.get_nowait()
-    assert index == 2 and error['oom'] and error['error'] == 'worker allocation'
+def test_cli_cuda_device_accepts_one_gpu_index(monkeypatch):
+    monkeypatch.setattr(sys, 'argv', ['inference_cli.py', 'input.mp4', '--cuda_device', '0,1'])
+    with pytest.raises(SystemExit) as error:
+        cli.parse_arguments()
+    assert error.value.code == 2
+
+
+def test_cli_limits_an_existing_visible_gpu_list_to_one_device():
+    environment = dict(os.environ)
+    environment['CUDA_VISIBLE_DEVICES'] = '0,1'
+    result = subprocess.run(
+        [sys.executable, '-c', 'import os, inference_cli; print(os.environ["CUDA_VISIBLE_DEVICES"])',
+         '--cuda_device', '1'],
+        cwd=Path(__file__).resolve().parents[1], env=environment,
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == '1'
