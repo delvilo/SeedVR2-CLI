@@ -411,7 +411,8 @@ class Debug:
                 )
 
         # Reset PyTorch's peak memory stats for next interval
-        reset_vram_peak(device=None, debug=self)
+        if not getattr(self, 'external_memory_recorder', False):
+            reset_vram_peak(device=None, debug=self)
     
     def _collect_memory_metrics(self) -> Dict[str, Any]:
         """Collect current memory metrics."""

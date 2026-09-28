@@ -23,8 +23,8 @@ Architecture:
     The CLI implements a 4-phase processing pipeline:
     1. Encode: VAE encoding with optional input noise and tiling
     2. Upscale: DiT transformer upscaling with latent space diffusion
-    3. Decode: VAE decoding with optional tiling
-    4. Postprocess: Color correction and temporal blending
+    3. Decode: tiled VAE decoding into bounded output batches
+    4. Postprocess/write: finalize overlaps and write immediately on the CPU
 
 Usage:
     python inference_cli.py video.mp4 --resolution 1080
@@ -47,9 +47,10 @@ import sys
 import os
 import argparse
 import time
+import math
 import multiprocessing as mp
-from typing import Dict, Any, List, Optional, Tuple, Literal, Generator
-from datetime import datetime
+from typing import Dict, Any, List, Optional, Tuple, Literal
+from contextlib import closing, ExitStack
 from pathlib import Path
 
 # Set up path before any other imports to fix module resolution
@@ -82,7 +83,6 @@ if _pre_args.cuda_device is not None:
 import torch
 import cv2
 import numpy as np
-import subprocess
 import shutil
 
 # Project imports
@@ -101,87 +101,16 @@ from src.core.generation_utils import (
 )
 from src.core.generation_phases import (
     encode_all_batches, 
-    upscale_all_batches, 
-    decode_all_batches, 
-    postprocess_all_batches
+    upscale_all_batches
 )
 from src.utils.debug import Debug
-from src.optimization.memory_manager import clear_memory
+from src.optimization.memory_manager import clear_memory, cleanup_text_embeddings
+from src.core.session import InferenceSession
+from src.core.streaming import iter_output_batches
+from src.optimization.memory_budget import GIB, available_ram_bytes, plan_memory, is_oom, reduce_workload
+from src.optimization.memory_profile import MemoryRecorder
+from src.utils.media import FFMPEGVideoWriter, OutputTransaction, read_frames, frame_pixels
 debug = Debug(enabled=False)  # Will be enabled via --debug CLI flag
-
-
-# =============================================================================
-# FFMPEG Class
-# =============================================================================
-
-class FFMPEGVideoWriter:
-    """
-    Video writer using ffmpeg subprocess for encoding with 10-bit support.
-    
-    Provides cv2.VideoWriter-compatible interface (write, isOpened, release) while
-    using ffmpeg for encoding. Enables 10-bit output (yuv420p10le with x265) which
-    reduces banding artifacts in gradients compared to 8-bit opencv output.
-    
-    Args:
-        path: Output video file path
-        width: Frame width in pixels
-        height: Frame height in pixels
-        fps: Frames per second
-        use_10bit: If True, uses x265 codec with yuv420p10le pixel format.
-                   If False, uses x264 with yuv420p (default: False)
-    
-    Raises:
-        RuntimeError: If ffmpeg is not found in system PATH
-    
-    Note:
-        Frames must be passed to write() in BGR format (same as cv2.VideoWriter).
-        Internally converts to RGB for ffmpeg rawvideo input.
-    """
-    
-    def __init__(self, path: str, width: int, height: int, fps: float, use_10bit: bool = False):
-        pix_fmt = 'yuv420p10le' if use_10bit else 'yuv420p'
-        codec = 'libx265' if use_10bit else 'libx264'
-        
-        self.proc = subprocess.Popen(
-            ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24',
-             '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
-             '-c:v', codec, '-pix_fmt', pix_fmt, '-preset', 'medium', '-crf', '12', path],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-    
-    def write(self, frame_bgr: np.ndarray):
-        if not self.isOpened():
-            raise RuntimeError("FFMPEGVideoWriter: ffmpeg process is not running")
-        
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        try:
-            self.proc.stdin.write(frame_rgb.astype(np.uint8).tobytes())
-            self.proc.stdin.flush()  # Critical: prevent buffering issues
-        except BrokenPipeError:
-            raise RuntimeError(
-                "FFMPEGVideoWriter: ffmpeg process terminated unexpectedly. "
-                "Check video path, codec support, and disk space."
-            )
-    
-    def isOpened(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
-    
-    def release(self):
-        if self.proc:
-            try:
-                self.proc.stdin.close()
-            except Exception:
-                pass  # Ignore errors on close
-            
-            self.proc.wait()
-            
-            if self.proc.returncode != 0:
-                debug.log(
-                    f"ffmpeg exited with code {self.proc.returncode}. "
-                    "Check output file for corruption.",
-                    level="WARNING", force=True, category="file"
-                )
-            self.proc = None
 
 
 # =============================================================================
@@ -294,18 +223,18 @@ def extract_frames_from_image(image_path: str) -> Tuple[torch.Tensor, float]:
         raise ValueError(f"Cannot open image file: {image_path}")
     
     # Convert BGR(A) to RGB(A) based on channel count
-    if frame.shape[2] == 4:
+    if frame.ndim == 2:
+        frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+    elif frame.shape[2] == 4:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGBA)
         debug.log(f"Detected RGBA image (alpha channel preserved)", category="file")
     else:
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
-    # Convert to float32 and normalize
-    frame = frame.astype(np.float32) / 255.0
-    
-    # Convert to tensor [1, H, W, C]
-    frames_tensor = torch.from_numpy(frame[None, ...]).to(torch.float16)
-    
+    if frame.dtype == np.uint16:
+        frame = frame.astype(np.float32) / 65535.0
+    frames_tensor = torch.from_numpy(frame[None, ...])
+
     debug.log(f"Image tensor shape: {frames_tensor.shape}, dtype: {frames_tensor.dtype}", category="memory")
     
     return frames_tensor, 30.0  # Default FPS for images
@@ -389,301 +318,211 @@ def generate_output_path(input_path: str, output_format: str, output_dir: Option
     return str(output_path.resolve())
 
 
-def process_single_file(input_path: str, args: argparse.Namespace, device_list: List[str], 
+def _plan_file(args, width, height, device_list, session):
+    """Reserve model/cache headroom before admitting bounded pixel buffers."""
+    planned = argparse.Namespace(**vars(args))
+    available = available_ram_bytes()
+    ram = min(int(args.ram_budget_gb * GIB), available) if args.ram_budget_gb else int(available * .8)
+    free_vram = min(torch.cuda.mem_get_info(int(d))[0] for d in device_list) if torch.cuda.is_available() else 0
+    vram = min(int(args.vram_budget_gb * GIB), free_vram) if args.vram_budget_gb else int(free_vram * .9)
+    model_dir = Path(args.model_dir or get_base_cache_dir())
+    weights = [(model_dir / name).stat().st_size if (model_dir / name).is_file() else 0
+               for name in (args.dit_model, DEFAULT_VAE)]
+    # Checkpoint size is a planning estimate, not the live tensor footprint.
+    reserve = int(sum(weights) * 1.25)
+    blocks = 36 if '7b' in args.dit_model else 32
+    if vram and weights[0]:
+        needed = math.ceil(blocks * max(0, 1 - .45 * vram / weights[0]))
+        planned.blocks_to_swap = min(blocks, max(args.blocks_to_swap, needed))
+        if planned.blocks_to_swap:
+            planned.dit_offload_device = 'cpu'
+    dit_resident = int(weights[0] * max(.1, 1 - planned.blocks_to_swap / blocks))
+    cache_ram = int(args.cache_ram_gb * GIB) if args.cache_ram_gb is not None else ram // 4
+    cache_vram = int(args.cache_vram_gb * GIB)
+    session.ram_cache_bytes = min(cache_ram, ram // 2) if args.cache_dit or args.cache_vae else 0
+    session.vram_cache_bytes = min(cache_vram, vram // 2) if args.cache_dit or args.cache_vae else 0
+    planned.cache_ram_gb = session.ram_cache_bytes / GIB
+    planned.cache_vram_gb = session.vram_cache_bytes / GIB
+    session.finish(args.cache_dit, args.cache_vae)
+    plan = plan_memory(width, height, args.resolution, args.max_resolution,
+                       args.chunk_size, args.batch_size,
+                       args.temporal_overlap,
+                       ram_bytes=max(0, ram - reserve - session.ram_cache_bytes),
+                       vram_bytes=vram, model_bytes=max(dit_resident, weights[1]), prepend=args.prepend_frames)
+    planned.chunk_size, planned.batch_size = plan.chunk_size, plan.batch_size
+    planned.temporal_overlap = min(args.temporal_overlap, plan.batch_size - 1)
+    for phase in ('encode', 'decode'):
+        size = min(getattr(args, f'vae_{phase}_tile_size'), plan.tile_size)
+        setattr(planned, f'vae_{phase}_tile_size', size)
+        setattr(planned, f'vae_{phase}_tile_overlap', min(getattr(args, f'vae_{phase}_tile_overlap'), size // 4))
+    debug.log(f'Memory plan: chunk={planned.chunk_size}, batch={planned.batch_size}, '
+              f'tile={plan.tile_size}, RAM working allowance={plan.ram_bytes / GIB:.2f} GiB',
+              category='memory', force=True)
+    MemoryRecorder(args.memory_report).record('plan', **plan.as_dict(), resolution=args.resolution,
+        seed=args.seed, model_reserve_bytes=reserve, cache_ram_bytes=session.ram_cache_bytes,
+        cache_vram_bytes=session.vram_cache_bytes)
+    return planned
+
+
+def process_single_file(input_path: str, args: argparse.Namespace, device_list: List[str],
                        output_path: Optional[str] = None, format_auto_detected: bool = False,
-                       runner_cache: Optional[Dict[str, Any]] = None) -> int:
-    """
-    Process a single video or image file with optional model caching.
-    
-    For videos, supports streaming mode (chunk_size > 0) which processes in memory-bounded
-    chunks with temporal overlap for seamless transitions between chunks.
-    
-    Args:
-        input_path: Path to input file
-        args: Command-line arguments with all processing settings
-        device_list: List of GPU device IDs as strings
-        output_path: Optional explicit output path (auto-generated if None)
-        format_auto_detected: Whether output format was auto-detected
-        runner_cache: Optional cache dict for model reuse across multiple files
-    
-    Returns:
-        Number of frames written to output
-    """
+                       runner_cache: Optional[InferenceSession] = None, output_is_resolved: bool = False) -> int:
+    """Restart an OOM attempt from the beginning, publishing only complete output."""
     input_type = get_input_type(input_path)
-    
-    if input_type == "unknown":
-        debug.log(f"Skipping unsupported file: {input_path}", level="WARNING", category="file", force=True)
+    if input_type not in ('video', 'image'):
         return 0
-    
-    debug.log(f"Processing {input_type}: {Path(input_path).name}", category="generation", force=True)
-    
-    # Generate or validate output path
+    is_sequence = input_type == 'video' and args.output_format == 'png'
     if output_path is None:
         output_path = generate_output_path(input_path, args.output_format, input_type=input_type)
-    elif not Path(output_path).suffix or (args.output_format == "png" and input_type != "image"):
-        # No extension or PNG sequence → treat as directory, generate filename
-        output_path = generate_output_path(input_path, args.output_format, 
-                                         output_dir=output_path, input_type=input_type)
-    
-    # Show format with auto-detection indicator
-    format_prefix = "Auto-detected" if format_auto_detected else "Requested"
-    debug.log(f"{format_prefix} output format: {args.output_format}", category="info", force=True, indent_level=1)
-    
-    # === VIDEO PROCESSING ===
-    if input_type == "video":
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"Video file not found: {input_path}")
-        
+    elif not output_is_resolved and (not Path(output_path).suffix or is_sequence):
+        output_path = generate_output_path(input_path, args.output_format, output_dir=output_path, input_type=input_type)
+    if input_type == 'video':
         cap = cv2.VideoCapture(input_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video file: {input_path}")
-        
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        debug.log(f"Video info: {total_frames} frames, {width}x{height}, {fps:.2f} FPS", category="info")
-        
-       # Skip initial frames
-        if args.skip_first_frames > 0:
-            debug.log(f"Skipping first {args.skip_first_frames} frames", category="info")
-            cap.set(cv2.CAP_PROP_POS_FRAMES, args.skip_first_frames)
-        
-        # Calculate frames to process (apply load_cap if set)
-        frames_to_process = total_frames - args.skip_first_frames
-        if args.load_cap > 0:
-            frames_to_process = min(frames_to_process, args.load_cap)
-        
-        # Early exit for empty/exhausted video
-        if frames_to_process <= 0:
-            debug.log(f"No frames to process after skipping {args.skip_first_frames} of {total_frames}", 
-                     level="WARNING", category="file", force=True)
+        try:
+            if not cap.isOpened():
+                raise ValueError(f'Cannot open video: {input_path}')
+            width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        finally:
             cap.release()
-            return 0
-        
-        # Streaming mode: process in chunks
-        chunk_size = args.chunk_size if args.chunk_size > 0 else frames_to_process
-        streaming = args.chunk_size > 0
-        total_chunks = (frames_to_process + chunk_size - 1) // chunk_size  # ceiling division
-        
-        if streaming:
-            debug.log(f"Streaming mode: chunks of {chunk_size} frames, overlap={args.temporal_overlap}", 
-                     category="info", force=True, indent_level=1)
-        
-        is_png = args.output_format == "png"
-        video_writer = None
-        overlap = args.temporal_overlap
-        frames_written = 0
-        chunk_idx = 0
-        base_name = Path(input_path).stem
-        
-        # Multi-GPU: workers stream their own segments
-        if len(device_list) > 1:
-            cap.release()  # Workers will reopen
-            video_info = {
-                'video_path': input_path,
-                'start_frame': args.skip_first_frames,
-                'frames_to_process': frames_to_process,
-            }
-            result = _gpu_processing(None, device_list, args, video_info=video_info)
-            
-            # Save result
-            if is_png:
-                save_frames_to_image(result, output_path, base_name)
-            else:
-                video_writer = save_frames_to_video(result, output_path, fps, 
-                    video_backend=args.video_backend, use_10bit=args.use_10bit)
-                if video_writer is not None:
-                    video_writer.release()
-            
-            frames_written = result.shape[0]
-        
-        # Single GPU: stream in main process
-        else:
-            chunk_count = 0
-            for result in _stream_video_chunks(
-                cap=cap,
-                frames_to_process=frames_to_process,
-                chunk_size=chunk_size,
-                overlap=overlap,
-                args=args,
-                device_id=device_list[0],
-                debug=debug,
-                runner_cache=runner_cache,
-                log_progress=streaming,
-                total_chunks=total_chunks,
-                cleanup_timer_name="chunk_cleanup"
-            ):
-                chunk_count += 1
-                
-                # Save output
-                if is_png:
-                    save_frames_to_image(result, output_path, base_name, start_index=frames_written)
-                else:
-                    video_writer = save_frames_to_video(result, output_path, fps, writer=video_writer,
-                        video_backend=args.video_backend, use_10bit=args.use_10bit)
-                
-                frames_written += result.shape[0]
-                del result
-            
-            chunk_idx = chunk_count
-            cap.release()
-            if video_writer is not None:
-                video_writer.release()
-        
-        if streaming:
-            debug.log("", category="none", force=True)
-            if len(device_list) > 1:
-                debug.log(f"Streaming complete: {frames_written} frames across {len(device_list)} GPUs", category="success", force=True)
-            else:
-                debug.log(f"Streaming complete: {frames_written} frames in {chunk_idx} chunks", category="success", force=True)
-        
-        debug.log(f"Output saved to: {output_path}", category="file", force=True)
-        return frames_written
-    
-    # === IMAGE PROCESSING ===
-    frames_tensor, _ = extract_frames_from_image(input_path)
-    
-    processing_start = time.time()
-    # Process frames (multiprocessing only for multi-GPU)
-    if len(device_list) > 1:
-        result = _gpu_processing(frames_tensor, device_list, args)
     else:
-        result = _single_gpu_direct_processing(frames_tensor, args, device_list[0], runner_cache)
-    debug.log(f"Processing time: {time.time() - processing_start:.2f}s", category="timing")
-    
-    # Save single image
-    os.makedirs(Path(output_path).parent, exist_ok=True)
-    frame_np = (result[0].cpu().numpy() * 255.0).astype(np.uint8)
-    _save_image_bgr(frame_np, output_path)
-    
-    debug.log(f"Output saved to: {output_path}", category="file", force=True)
-    return 1
+        probe, _ = extract_frames_from_image(input_path)
+        height, width = probe.shape[1:3]
+        del probe
+    if min(width, height) <= 0:
+        raise ValueError(f'Invalid media dimensions: {width}x{height}')
+    session = runner_cache or InferenceSession(debug=debug)
+    recorder = MemoryRecorder(args.memory_report, _device_id_to_name(device_list[0]))
+    try:
+        planned = _plan_file(args, width, height, device_list, session)
+        for attempt in range(args.oom_retries + 1):
+            recorder.record('attempt', input=str(input_path), attempt=attempt,
+                            chunk_size=planned.chunk_size, batch_size=planned.batch_size)
+            try:
+                with OutputTransaction(output_path, image_sequence=is_sequence, sequence_name=Path(input_path).stem) as output:
+                    count = _write_file_attempt(input_path, str(output.path), input_type, planned, device_list, session)
+                    if count:
+                        output.commit()
+                recorder.record('complete', input=str(input_path), attempt=attempt, frames=count)
+                debug.log(f'Output saved to: {output_path} ({count} frames)', category='file', force=True)
+                return count
+            except Exception as error:
+                if not is_oom(error) or attempt >= args.oom_retries:
+                    raise
+                reason = str(error)
+                if not reduce_workload(planned):
+                    raise
+            # Leave the except scope first: traceback frames may own GPU tensors.
+            session.close()
+            clear_memory(debug=debug, deep=True, force=True)
+            recorder.record('oom_retry', attempt=attempt + 1, reason=reason,
+                batch_size=planned.batch_size, chunk_size=planned.chunk_size,
+                tile_size=planned.vae_decode_tile_size, seed=planned.seed, resolution=planned.resolution)
+            debug.log(f'OOM: restarting file with chunk={planned.chunk_size}, batch={planned.batch_size}, '
+                      f'tile={planned.vae_decode_tile_size}', level='WARNING', category='memory', force=True)
+    finally:
+        if runner_cache is None:
+            session.close()
 
 
-def _read_frames_from_cap(cap: cv2.VideoCapture, max_frames: int) -> Optional[torch.Tensor]:
-    """
-    Read up to max_frames from an already-open VideoCapture.
-    
-    Args:
-        cap: An already opened cv2.VideoCapture instance
-        max_frames: Maximum number of frames to read in this call
-    
-    Returns:
-        Tensor [T, H, W, C] float32 [0,1], or None if no frames available
-    """
-    frames = []
-    for _ in range(max_frames):
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        frames.append(frame)
-    
-    if not frames:
-        return None
-    return torch.from_numpy(np.stack(frames)).to(torch.float32)
+def _write_file_attempt(input_path, output_path, input_type, args, device_list, session):
+    """Own the capture, generator and writer together, including cancellation."""
+    if input_type == 'image':
+        frames, fps = extract_frames_from_image(input_path)
+        result = (_gpu_processing(frames, device_list, args) if len(device_list) > 1 else
+                  _process_frames_core(frames, args, device_list[0], debug, session))
+        if args.output_format == 'mp4':
+            writer = save_frames_to_video(result, output_path, fps, video_backend=args.video_backend, use_10bit=args.use_10bit)
+            writer.release()
+        else:
+            _save_image_bgr(frame_pixels(result[0]), output_path)
+        return result.shape[0]
+    cap = cv2.VideoCapture(input_path)
+    writer = None
+    complete = False
+    try:
+        if not cap.isOpened():
+            raise ValueError(f'Cannot open video: {input_path}')
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        count = max(0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - args.skip_first_frames)
+        if args.load_cap:
+            count = min(count, args.load_cap)
+        if not count:
+            return 0
+        cap.set(cv2.CAP_PROP_POS_FRAMES, args.skip_first_frames)
+        if len(device_list) > 1:
+            # Existing multi-GPU collection is retained; the single-GPU path is bounded.
+            result = _gpu_processing(None, device_list, args, video_info=dict(
+                video_path=input_path, start_frame=args.skip_first_frames, frames_to_process=count))
+            batches = iter((result,))
+        else:
+            batches = _stream_video_chunks(cap, count, args.chunk_size, args.temporal_overlap,
+                args, device_list[0], debug, session, log_progress=True,
+                total_chunks=(count + args.chunk_size - 1) // args.chunk_size)
+        written = 0
+        with ExitStack() as stack:
+            if hasattr(batches, 'close'):
+                stack.callback(batches.close)
+            for batch in batches:
+                if args.output_format == 'png':
+                    save_frames_to_image(batch, output_path, Path(input_path).stem, start_index=written)
+                else:
+                    writer = save_frames_to_video(batch, output_path, fps, writer=writer,
+                        video_backend=args.video_backend, use_10bit=args.use_10bit)
+                written += batch.shape[0]
+                del batch
+        if writer is not None:
+            writer.release()
+            writer = None
+        complete = True
+        return written
+    finally:
+        cap.release()
+        if writer is not None:
+            if not complete and hasattr(writer, 'abort'):
+                writer.abort()
+            else:
+                writer.release()
 
 
-def _stream_video_chunks(
-    cap: cv2.VideoCapture,
-    frames_to_process: int,
-    chunk_size: int,
-    overlap: int,
-    args: argparse.Namespace,
-    device_id: str,
-    debug: 'Debug',
-    runner_cache: Optional[Dict[str, Any]],
-    log_progress: bool = False,
-    total_chunks: int = 0,
-    cleanup_timer_name: Optional[str] = None,
-    log_prefix: str = ""
-) -> Generator[torch.Tensor, None, None]:
-    """
-    Generator that streams and processes video chunks.
-    
-    Handles frame reading, temporal context prepending, processing via
-    _process_frames_core, context removal from output, and memory cleanup.
-    Caller is responsible for VideoCapture lifecycle and result handling.
-    
-    Args:
-        cap: Open VideoCapture positioned at start frame
-        frames_to_process: Total frames to read and process
-        chunk_size: Frames per chunk (use frames_to_process for single chunk)
-        overlap: Temporal overlap frames between chunks for blending
-        args: Processing arguments (copied internally, prepend_frames zeroed after first chunk)
-        device_id: GPU device ID for processing
-        debug: Debug instance for logging
-        runner_cache: Optional model cache dict for reuse across chunks
-        log_progress: If True, log chunk progress with separators
-        total_chunks: Total chunks for progress display (used if log_progress=True)
-        cleanup_timer_name: Optional timer name for memory cleanup logging
-        log_prefix: Optional prefix for log messages (e.g., "[GPU 0] " for worker identification)
-    
-    Yields:
-        Processed frames tensor [T, H, W, C] for each chunk, context frames removed
-    """
+def _read_frames_from_cap(cap, max_frames):
+    return read_frames(cap, max_frames)
+
+
+def _stream_video_chunks(cap, frames_to_process, chunk_size, overlap, args, device_id,
+                         debug, runner_cache, log_progress=False, total_chunks=0,
+                         cleanup_timer_name=None, log_prefix=''):
+    """Read a uint8 window; yield finalized output batches directly to the sink."""
     chunk_args = argparse.Namespace(**vars(args))
     frames_read = 0
     prev_raw_tail = None
     chunk_idx = 0
-    streaming = chunk_size < frames_to_process
-    
+    recorder = MemoryRecorder(args.memory_report, _device_id_to_name(device_id))
     while frames_read < frames_to_process:
-        read_count = min(chunk_size, frames_to_process - frames_read)
-        new_frames = _read_frames_from_cap(cap, read_count)
+        with recorder.phase('read'):
+            new_frames = read_frames(cap, min(chunk_size, frames_to_process - frames_read))
         if new_frames is None:
             break
-        frames_read += new_frames.shape[0]
+        frames_read += len(new_frames)
         chunk_idx += 1
-        
-        # Disable prepend_frames after first chunk
         if chunk_idx > 1:
             chunk_args.prepend_frames = 0
-        
-        # Prepend context from previous chunk
-        if prev_raw_tail is not None and overlap > 0:
-            context_count = min(overlap, prev_raw_tail.shape[0])
-            frames = torch.cat([prev_raw_tail[-context_count:], new_frames], dim=0)
-        else:
-            frames = new_frames
-            context_count = 0
-        
-        # Log progress if enabled
-        if log_progress and streaming:
-            if chunk_idx > 1:
-                debug.log("", category="none", force=True)
-                debug.log("━" * 60, category="none", force=True)
-            debug.log("", category="none", force=True)
-            debug.log(f"{log_prefix}Chunk {chunk_idx}/{total_chunks}: {new_frames.shape[0]} new + {context_count} context frames", 
-                     category="generation", force=True)
-            debug.log("", category="none", force=True)
-        
-        # Process chunk
-        result = _process_frames_core(
-            frames_tensor=frames.to(torch.float16),
-            args=chunk_args,
-            device_id=device_id,
-            debug=debug,
-            runner_cache=runner_cache
-        )
-        
-        # Remove context frames from output
-        if context_count > 0:
-            result = result[context_count:]
-        
-        # Save tail for next chunk context
-        prev_raw_tail = new_frames[-overlap:].clone() if overlap > 0 else None
-        
-        # Cleanup before yield
+        context_count = min(overlap, len(prev_raw_tail)) if prev_raw_tail is not None else 0
+        frames = torch.cat((prev_raw_tail[-context_count:], new_frames)) if context_count else new_frames
+        prev_raw_tail = frames[-overlap:].clone() if overlap else None
+        del new_frames
+        if log_progress:
+            debug.log(f'{log_prefix}Chunk {chunk_idx}/{total_chunks}: {len(frames) - context_count} new frames',
+                      category='generation', force=True)
+        drop = context_count
+        with closing(_iter_processed_batches(frames, chunk_args, device_id, debug, runner_cache)) as outputs:
+            for result in outputs:
+                skip = min(drop, len(result))
+                drop -= skip
+                if skip < len(result):
+                    yield result[skip:]
+                del result
         del frames
-        
-        yield result
-        
-        # Memory cleanup between chunks
-        if streaming:
-            clear_memory(debug=debug, deep=True, force=True, timer_name=cleanup_timer_name)
+        recorder.record('chunk_complete', chunk=chunk_idx, input_frames=frames_read)
 
 
 def _save_image_bgr(frame_np: np.ndarray, file_path: str) -> None:
@@ -698,7 +537,8 @@ def _save_image_bgr(frame_np: np.ndarray, file_path: str) -> None:
         frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGBA2BGRA)
     else:
         frame_bgr = cv2.cvtColor(frame_np, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(file_path, frame_bgr)
+    if not cv2.imwrite(str(file_path), frame_bgr):
+        raise OSError(f'Cannot write image: {file_path}')
 
 
 def save_frames_to_video(
@@ -712,8 +552,8 @@ def save_frames_to_video(
     """
     Save frames tensor to MP4 video file.
     
-    Converts tensor from Float32 [0,1] to uint8 [0,255], RGB to BGR for OpenCV,
-    and writes to video file using mp4v codec. Supports streaming mode where
+    Converts one frame at a time from normalized floating point to uint8
+    (or uint16 RGB transport for FFmpeg 10-bit), using BGR only for OpenCV. Supports streaming mode where
     an existing writer is passed and kept open for subsequent chunks.
     
     Args:
@@ -728,8 +568,7 @@ def save_frames_to_video(
     Raises:
         ValueError: If video writer cannot be initialized
     """
-    frames_np = (frames_tensor.cpu().numpy() * 255.0).astype(np.uint8)
-    T, H, W, C = frames_np.shape
+    T, H, W, C = frames_tensor.shape
     
     if writer is None:
         debug.log(f"Saving {T} frames to video: {output_path} (backend={video_backend})", category="file")
@@ -740,14 +579,23 @@ def save_frames_to_video(
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             writer = cv2.VideoWriter(output_path, fourcc, fps, (W, H))
         if not writer.isOpened():
+            writer.release()
             raise ValueError(f"Cannot create video writer for: {output_path}")
     
-    for i, frame in enumerate(frames_np):
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        writer.write(frame_bgr)
-        if debug.enabled and (i + 1) % 100 == 0:
-            debug.log(f"Written {i + 1}/{T} frames", category="file")
-    
+    try:
+        for frame in frames_tensor:
+            pixels = frame_pixels(frame, high_bit_depth=use_10bit and video_backend == 'ffmpeg')
+            if video_backend == 'ffmpeg':
+                writer.write_rgb(pixels)
+            else:
+                writer.write(cv2.cvtColor(pixels[..., :3], cv2.COLOR_RGB2BGR))
+    except BaseException:
+        if hasattr(writer, 'abort'):
+            writer.abort()
+        else:
+            writer.release()
+        raise
+
     return writer  # Caller always closes
 
 
@@ -774,17 +622,16 @@ def save_frames_to_image(
     """
     os.makedirs(output_dir, exist_ok=True)
     
-    frames_np = (frames_tensor.cpu().numpy() * 255.0).astype(np.uint8)
-    total = frames_np.shape[0]
+    total = frames_tensor.shape[0]
     
     if start_index == 0:
         debug.log(f"Saving {total} frames as PNGs to directory: {output_dir}", category="file")
     digits = 6  # Supports up to 999,999 frames (~11.5 hours at 24fps)
 
-    for idx, frame in enumerate(frames_np):
+    for idx, frame in enumerate(frames_tensor):
         filename = f"{base_name}_{start_index + idx:0{digits}d}.png"
         file_path = os.path.join(output_dir, filename)
-        _save_image_bgr(frame, file_path)
+        _save_image_bgr(frame_pixels(frame), file_path)
         if debug.enabled and (idx + 1) % 100 == 0:
             debug.log(f"Saved {idx + 1}/{total} images", category="file")
 
@@ -796,62 +643,24 @@ def save_frames_to_image(
 # Core Processing Logic
 # =============================================================================
 
-def _process_frames_core(
-    frames_tensor: torch.Tensor,
-    args: argparse.Namespace,
-    device_id: str,
-    debug: Debug,
-    runner_cache: Optional[Dict[str, Any]] = None
-) -> torch.Tensor:
-    """
-    Core frame processing logic shared between worker and direct processing.
-    
-    Executes the complete 4-phase pipeline: encode → upscale → decode → postprocess.
-    Supports both cached (direct) and non-cached (worker) execution modes.
-    
-    Args:
-        frames_tensor: Input frames [T, H, W, C], Float16/Float32, range [0,1]
-        args: Command-line arguments with all processing settings
-        device_id: Device ID for inference ("0", "1", etc.)
-        debug: Debug instance for logging
-        runner_cache: Optional cache dict for model reuse (direct mode only)
-    
-    Returns:
-        Upscaled frames tensor [T', H', W', C], Float32, range [0,1]
-    """    
-    # Convert CUDA device IDs to full names
-    platform_type = "cuda"
-    inference_device = _device_id_to_name(device_id, platform_type)
-    
-    # Parse offload devices (with caching defaults)
-    cache_dit = args.cache_dit if runner_cache is not None else False
-    cache_vae = args.cache_vae if runner_cache is not None else False
-    
-    dit_offload = _parse_offload_device(args.dit_offload_device, platform_type, cache_dit)
-    vae_offload = _parse_offload_device(args.vae_offload_device, platform_type, cache_vae)
-    tensor_offload = _parse_offload_device(args.tensor_offload_device, platform_type, False)
-    
-    # Setup or reuse generation context
-    if runner_cache is not None and 'ctx' in runner_cache:
-        ctx = runner_cache['ctx']
-        # Clear previous run data but keep device config
-        keys_to_keep = {'dit_device', 'vae_device', 'dit_offload_device', 
-                       'vae_offload_device', 'tensor_offload_device', 'compute_dtype'}
-        for key in list(ctx.keys()):
-            if key not in keys_to_keep:
-                del ctx[key]
-    else:
-        ctx = setup_generation_context(
-            dit_device=inference_device,
-            vae_device=inference_device,
-            dit_offload_device=dit_offload,
-            vae_offload_device=vae_offload,
-            tensor_offload_device=tensor_offload,
-            debug=debug
-        )
-        if runner_cache is not None:
-            runner_cache['ctx'] = ctx
-    
+def _process_frames_core(frames_tensor, args, device_id, debug, runner_cache=None):
+    """Collector for single images and the existing multi-GPU transport only."""
+    with closing(_iter_processed_batches(frames_tensor, args, device_id, debug, runner_cache)) as outputs:
+        batches = list(outputs)
+    return torch.cat(batches) if batches else torch.empty(0, dtype=torch.bfloat16)
+
+
+def _iter_processed_batches(frames_tensor, args, device_id, debug, runner_cache=None):
+    inference_device = _device_id_to_name(device_id)
+    session = runner_cache or InferenceSession(debug=debug)
+    cache_dit, cache_vae = args.cache_dit, args.cache_vae
+    dit_offload = _parse_offload_device(args.dit_offload_device, 'cuda', cache_dit)
+    vae_offload = _parse_offload_device(args.vae_offload_device, 'cuda', cache_vae)
+    tensor_offload = _parse_offload_device(args.tensor_offload_device, 'cuda')
+    ctx = setup_generation_context(dit_device=inference_device, vae_device=inference_device,
+        dit_offload_device=dit_offload, vae_offload_device=vae_offload,
+        tensor_offload_device=tensor_offload, debug=debug)
+    recorder = MemoryRecorder(args.memory_report, inference_device)
     # Build torch compile args
     torch_compile_args_dit = None
     torch_compile_args_vae = None
@@ -877,110 +686,114 @@ def _process_frames_core(
     # Prepare runner with caching support
     model_dir = args.model_dir if args.model_dir is not None else get_base_cache_dir()
     
-    # Use fixed IDs for CLI caching when enabled
-    dit_id = "cli_dit" if cache_dit else None
-    vae_id = "cli_vae" if cache_vae else None
+    success = False
+    previous_recorder = getattr(debug, 'external_memory_recorder', False)
+    debug.external_memory_recorder = bool(args.memory_report)
+    try:
+        with recorder.phase("setup"):
+            runner, cache_context = prepare_runner(
+                dit_model=args.dit_model,
+                vae_model=DEFAULT_VAE,
+                model_dir=model_dir,
+                debug=debug,
+                ctx=ctx,
+                dit_cache=cache_dit,
+                vae_cache=cache_vae,
+                session=session,
+                block_swap_config={
+                    'blocks_to_swap': args.blocks_to_swap,
+                    'swap_io_components': args.swap_io_components,
+                    'offload_device': dit_offload,
+                },
+                encode_tiled=args.vae_encode_tiled,
+                encode_tile_size=(args.vae_encode_tile_size, args.vae_encode_tile_size),
+                encode_tile_overlap=(args.vae_encode_tile_overlap, args.vae_encode_tile_overlap),
+                decode_tiled=args.vae_decode_tiled,
+                decode_tile_size=(args.vae_decode_tile_size, args.vae_decode_tile_size),
+                decode_tile_overlap=(args.vae_decode_tile_overlap, args.vae_decode_tile_overlap),
+                tile_debug=args.tile_debug.lower() if args.tile_debug else "false",
+                attention_mode=args.attention_mode,
+                torch_compile_args_dit=torch_compile_args_dit,
+                torch_compile_args_vae=torch_compile_args_vae
+            )
     
-    runner, cache_context = prepare_runner(
-        dit_model=args.dit_model,
-        vae_model=DEFAULT_VAE,
-        model_dir=model_dir,
-        debug=debug,
-        ctx=ctx,
-        dit_cache=cache_dit,
-        vae_cache=cache_vae,
-        dit_id=dit_id,
-        vae_id=vae_id,
-        block_swap_config={
-            'blocks_to_swap': args.blocks_to_swap,
-            'swap_io_components': args.swap_io_components,
-            'offload_device': dit_offload,
-        },
-        encode_tiled=args.vae_encode_tiled,
-        encode_tile_size=(args.vae_encode_tile_size, args.vae_encode_tile_size),
-        encode_tile_overlap=(args.vae_encode_tile_overlap, args.vae_encode_tile_overlap),
-        decode_tiled=args.vae_decode_tiled,
-        decode_tile_size=(args.vae_decode_tile_size, args.vae_decode_tile_size),
-        decode_tile_overlap=(args.vae_decode_tile_overlap, args.vae_decode_tile_overlap),
-        tile_debug=args.tile_debug.lower() if args.tile_debug else "false",
-        attention_mode=args.attention_mode,
-        torch_compile_args_dit=torch_compile_args_dit,
-        torch_compile_args_vae=torch_compile_args_vae
-    )
+            cache_context.clear()
+
+            # Preload text embeddings before Phase 1 to avoid sync stall in Phase 2
+            ctx['text_embeds'] = load_text_embeddings(script_directory, ctx['dit_device'], ctx['compute_dtype'], debug)
+            debug.log("Loaded text embeddings for DiT", category="dit")
+
+        # Compute generation info and log start (handles prepending internally)
+        frames_tensor, gen_info = compute_generation_info(
+            ctx=ctx,
+            images=frames_tensor,
+            resolution=args.resolution,
+            max_resolution=args.max_resolution,
+            batch_size=args.batch_size,
+            uniform_batch_size=args.uniform_batch_size,
+            seed=args.seed,
+            prepend_frames=args.prepend_frames,
+            temporal_overlap=args.temporal_overlap,
+            debug=debug
+        )
+        log_generation_start(gen_info, debug)
     
-    ctx['cache_context'] = cache_context
-    if runner_cache is not None:
-        runner_cache['runner'] = runner
+        # Phase 1: Encode
+        with recorder.phase("encode"):
+            ctx = encode_all_batches(
+                runner, ctx=ctx, images=frames_tensor,
+                debug=debug,
+                batch_size=args.batch_size,
+                uniform_batch_size=args.uniform_batch_size,
+                seed=args.seed,
+                progress_callback=None,
+                temporal_overlap=args.temporal_overlap,
+                resolution=args.resolution,
+                max_resolution=args.max_resolution,
+                input_noise_scale=args.input_noise_scale,
+                color_correction=args.color_correction
+            )
     
-    # Preload text embeddings before Phase 1 to avoid sync stall in Phase 2
-    ctx['text_embeds'] = load_text_embeddings(script_directory, ctx['dit_device'], ctx['compute_dtype'], debug)
-    debug.log("Loaded text embeddings for DiT", category="dit")
+        # Phase 2: Upscale
+        with recorder.phase("upscale"):
+            ctx = upscale_all_batches(
+                runner, ctx=ctx, debug=debug, progress_callback=None,
+                seed=args.seed,
+                latent_noise_scale=args.latent_noise_scale,
+                cache_model=cache_dit
+            )
     
-    # Compute generation info and log start (handles prepending internally)
-    frames_tensor, gen_info = compute_generation_info(
-        ctx=ctx,
-        images=frames_tensor,
-        resolution=args.resolution,
-        max_resolution=args.max_resolution,
-        batch_size=args.batch_size,
-        uniform_batch_size=args.uniform_batch_size,
-        seed=args.seed,
-        prepend_frames=args.prepend_frames,
-        temporal_overlap=args.temporal_overlap,
-        debug=debug
-    )
-    log_generation_start(gen_info, debug)
-    
-    # Phase 1: Encode
-    ctx = encode_all_batches(
-        runner, ctx=ctx, images=frames_tensor,
-        debug=debug, 
-        batch_size=args.batch_size,
-        uniform_batch_size=args.uniform_batch_size,
-        seed=args.seed,
-        progress_callback=None, 
-        temporal_overlap=args.temporal_overlap,
-        resolution=args.resolution,
-        max_resolution=args.max_resolution,
-        input_noise_scale=args.input_noise_scale,
-        color_correction=args.color_correction
-    )
-    
-    # Phase 2: Upscale
-    ctx = upscale_all_batches(
-        runner, ctx=ctx, debug=debug, progress_callback=None,
-        seed=args.seed,
-        latent_noise_scale=args.latent_noise_scale,
-        cache_model=cache_dit
-    )
-    
-    # Phase 3: Decode
-    ctx = decode_all_batches(
-        runner, ctx=ctx, debug=debug, progress_callback=None,
-        cache_model=cache_vae
-    )
-    
-    # Phase 4: Post-process
-    ctx = postprocess_all_batches(
-        ctx=ctx, debug=debug, progress_callback=None,
-        color_correction=args.color_correction,
-        prepend_frames=0,  # Worker mode handles this in main process
-        temporal_overlap=args.temporal_overlap,
-        batch_size=args.batch_size
-    )
-    
-    result_tensor = ctx['final_video']
-    
-    # Convert to CPU and compatible dtype
-    if result_tensor.is_cuda:
-        result_tensor = result_tensor.cpu()
-    if result_tensor.dtype in (torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2):
-        result_tensor = result_tensor.to(torch.float32)
-    
-    return result_tensor
+        # CPU postprocessing avoids co-residency with the active VAE on CUDA.
+        ctx['postprocess_device'] = torch.device('cpu')
+        drop = args.prepend_frames
+        with recorder.phase('decode_postprocess_write'):
+            with closing(iter_output_batches(runner, ctx, debug, args.color_correction, cache_vae)) as outputs:
+                for result in outputs:
+                    skip = min(drop, len(result))
+                    drop -= skip
+                    if skip < len(result):
+                        yield result[skip:]
+                    del result
+        success = True
+    finally:
+        cleanup_text_embeddings(ctx, debug)
+        ctx.clear()
+        debug.external_memory_recorder = previous_recorder
+        debug.clear_history()
+        if success and runner_cache is not None:
+            session.finish(cache_dit, cache_vae)
+        else:
+            session.close()
 
 
-def _worker_process(
+def _worker_process(proc_idx, device_id, frames_np, shared_args, return_queue, done_barrier, video_info=None):
+    try:
+        _worker_run(proc_idx, device_id, frames_np, shared_args, return_queue, done_barrier, video_info)
+    except BaseException as error:
+        return_queue.put((proc_idx, {'error': str(error), 'oom': is_oom(error)}))
+
+
+def _worker_run(
     proc_idx: int, 
     device_id: str, 
     frames_np: Optional[np.ndarray],
@@ -1031,31 +844,34 @@ def _worker_process(
             worker_args.prepend_frames = 0
         
         # Enable model caching within worker only if requested
-        runner_cache = {} if (args.cache_dit or args.cache_vae) else None
+        runner_cache = InferenceSession(int((args.cache_ram_gb or 0) * GIB), int(args.cache_vram_gb * GIB), worker_debug)
         
         total_chunks = (segment_frames + chunk_size - 1) // chunk_size
-        results = []
-        for result in _stream_video_chunks(
-            cap=cap,
-            frames_to_process=segment_frames,
-            chunk_size=chunk_size,
-            overlap=args.temporal_overlap,
-            args=worker_args,
-            device_id="0",
-            debug=worker_debug,
-            runner_cache=runner_cache,
-            log_progress=total_chunks > 1,
-            total_chunks=total_chunks,
-            log_prefix=f"[GPU {proc_idx}] "
-        ):
-            results.append(result.cpu())
+        try:
+            results = []
+            for result in _stream_video_chunks(
+                cap=cap,
+                frames_to_process=segment_frames,
+                chunk_size=chunk_size,
+                overlap=args.temporal_overlap,
+                args=worker_args,
+                device_id="0",
+                debug=worker_debug,
+                runner_cache=runner_cache,
+                log_progress=total_chunks > 1,
+                total_chunks=total_chunks,
+                log_prefix=f"[GPU {proc_idx}] "
+            ):
+                results.append(result.cpu())
         
-        cap.release()
+        finally:
+            cap.release()
+            runner_cache.close()
         result_tensor = torch.cat(results, dim=0) if results else torch.empty(0, dtype=torch.float32)
     
     # Pre-loaded frames mode (original behavior)
     else:
-        frames_tensor = torch.from_numpy(frames_np).to(torch.float16)
+        frames_tensor = torch.from_numpy(frames_np)
         result_tensor = _process_frames_core(
             frames_tensor=frames_tensor,
             args=args,
@@ -1065,7 +881,7 @@ def _worker_process(
         )
     
     # Share tensor memory for efficient cross-process transfer (avoids pickling large arrays)
-    return_queue.put((proc_idx, result_tensor.share_memory_()))
+    return_queue.put((proc_idx, result_tensor.to(torch.float32).share_memory_()))
     
     # Wait for parent to copy shared tensors before exiting
     # (shared memory requires creating process to stay alive during access)
@@ -1076,7 +892,7 @@ def _single_gpu_direct_processing(
     frames_tensor: torch.Tensor,
     args: argparse.Namespace,
     device_id: str,
-    runner_cache: Optional[Dict[str, Any]]
+    runner_cache: Optional[InferenceSession]
 ) -> torch.Tensor:
     """
     Direct single-GPU processing with model caching support.
@@ -1117,6 +933,10 @@ def _gpu_processing(
     Returns:
         Upscaled frames tensor [T', H', W', C], Float32, range [0,1]
     """
+    if frames_tensor is not None and len(frames_tensor) == 1:
+        return _process_frames_core(frames_tensor, args, device_list[0], debug)
+    if video_info is not None:
+        device_list = device_list[:video_info['frames_to_process']]
     num_devices = len(device_list)
     overlap = args.temporal_overlap
     
@@ -1125,135 +945,152 @@ def _gpu_processing(
     workers = []
     shared_args = vars(args).copy()
     
-    # Video streaming mode: distribute frame ranges to workers
-    if video_info is not None:
-        total_frames = video_info['frames_to_process']
-        start_frame = video_info['start_frame']
-        video_path = video_info['video_path']
+    visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+    try:
+        # Video streaming mode: distribute frame ranges to workers
+        if video_info is not None:
+            total_frames = video_info['frames_to_process']
+            start_frame = video_info['start_frame']
+            video_path = video_info['video_path']
         
-        base_per_gpu = total_frames // num_devices
-        remainder = total_frames % num_devices
+            base_per_gpu = total_frames // num_devices
+            remainder = total_frames % num_devices
         
-        current_start = start_frame
-        for idx, device_id in enumerate(device_list):
-            gpu_frames = base_per_gpu + (1 if idx < remainder else 0)
-            gpu_end = current_start + gpu_frames
+            current_start = start_frame
+            for idx, device_id in enumerate(device_list):
+                gpu_frames = base_per_gpu + (1 if idx < remainder else 0)
+                gpu_end = current_start + gpu_frames
             
-            # Add overlap frames for blending (except last GPU)
-            if idx < num_devices - 1 and overlap > 0:
-                gpu_end = min(gpu_end + overlap, start_frame + total_frames)
+                # Add overlap frames for blending (except last GPU)
+                if idx < num_devices - 1 and overlap > 0:
+                    gpu_end = min(gpu_end + overlap, start_frame + total_frames)
             
-            worker_video_info = {
-                'video_path': video_path,
-                'start_frame': current_start,
-                'end_frame': gpu_end,
-            }
+                worker_video_info = {
+                    'video_path': video_path,
+                    'start_frame': current_start,
+                    'end_frame': gpu_end,
+                }
             
-            os.environ["CUDA_VISIBLE_DEVICES"] = device_id
-            p = mp.Process(
-                target=_worker_process,
-                args=(idx, device_id, None, shared_args, return_queue, done_barrier),
-                kwargs={'video_info': worker_video_info}
-            )
-            p.start()
-            workers.append(p)
+                os.environ["CUDA_VISIBLE_DEVICES"] = device_id
+                p = mp.Process(
+                    target=_worker_process,
+                    args=(idx, device_id, None, shared_args, return_queue, done_barrier),
+                    kwargs={'video_info': worker_video_info}
+                )
+                p.start()
+                workers.append(p)
             
-            current_start += gpu_frames
+                current_start += gpu_frames
     
-    # Pre-loaded frames mode (original behavior for images or non-streaming)
-    else:
-        total_frames = frames_tensor.shape[0]
-        
-        if overlap > 0 and num_devices > 1:
-            chunk_with_overlap = total_frames // num_devices + overlap
-            if args.batch_size > 1:
-                chunk_with_overlap = ((chunk_with_overlap + args.batch_size - 1) // args.batch_size) * args.batch_size
-            base_chunk_size = chunk_with_overlap - overlap
-
-            chunks = []
-            for i in range(num_devices):
-                start_idx = i * base_chunk_size
-                if i == num_devices - 1:
-                    end_idx = total_frames
-                else:
-                    end_idx = min(start_idx + chunk_with_overlap, total_frames)
-                chunks.append(frames_tensor[start_idx:end_idx])
+        # Pre-loaded frames mode (original behavior for images or non-streaming)
         else:
-            chunks = torch.chunk(frames_tensor, num_devices, dim=0)
-
-        for idx, (device_id, chunk_tensor) in enumerate(zip(device_list, chunks)):
-            os.environ["CUDA_VISIBLE_DEVICES"] = device_id
-            p = mp.Process(
-                target=_worker_process,
-                args=(idx, device_id, chunk_tensor.cpu().numpy(), shared_args, return_queue, done_barrier),
-            )
-            p.start()
-            workers.append(p)
-
-    # Collect results before joining to prevent deadlock
-    # Tensors arrive via shared memory - copy to numpy while workers still alive
-    results_np = [None] * num_devices
-    collected = 0
-    while collected < num_devices:
-        proc_idx, result_tensor = return_queue.get()
-        results_np[proc_idx] = result_tensor.numpy()
-        collected += 1
-    
-    # Release workers now that shared tensors are copied
-    done_barrier.wait()
-    
-    # Now safe to join
-    for p in workers:
-        p.join()
-
-    # Concatenate results with overlap blending using shared function
-    if args.temporal_overlap > 0 and num_devices > 1:        
-        overlap = args.temporal_overlap
-        result_tensor = None
+            total_frames = frames_tensor.shape[0]
         
-        for idx, res_np in enumerate(results_np):
-            chunk_tensor = torch.from_numpy(res_np).to(torch.float32)
-            
-            if idx == 0:
-                # First chunk: keep all frames
-                result_tensor = chunk_tensor
+            if overlap > 0 and num_devices > 1:
+                chunk_with_overlap = total_frames // num_devices + overlap
+                if args.batch_size > 1:
+                    chunk_with_overlap = ((chunk_with_overlap + args.batch_size - 1) // args.batch_size) * args.batch_size
+                base_chunk_size = chunk_with_overlap - overlap
+
+                chunks = []
+                for i in range(num_devices):
+                    start_idx = i * base_chunk_size
+                    if i == num_devices - 1:
+                        end_idx = total_frames
+                    else:
+                        end_idx = min(start_idx + chunk_with_overlap, total_frames)
+                    chunks.append(frames_tensor[start_idx:end_idx])
             else:
-                # Subsequent chunks: blend overlapping region with accumulated result
-                if chunk_tensor.shape[0] > overlap and result_tensor.shape[0] >= overlap:
-                    # Get overlapping regions
-                    prev_tail = result_tensor[-overlap:]  # Last N frames from accumulated result
-                    cur_head = chunk_tensor[:overlap]      # First N frames from current chunk
-                    
-                    # Blend using shared function
-                    blended = blend_overlapping_frames(prev_tail, cur_head, overlap)
-                    
-                    # Replace tail of result with blended frames, then append rest of chunk
-                    result_tensor = torch.cat([
-                        result_tensor[:-overlap],           # Everything except the tail
-                        blended,                            # Blended overlapping frames
-                        chunk_tensor[overlap:]              # Non-overlapping part of current chunk
-                    ], dim=0)
-                else:
-                    # Edge case: chunk too small, just append non-overlapping part
-                    if chunk_tensor.shape[0] > overlap:
-                        result_tensor = torch.cat([result_tensor, chunk_tensor[overlap:]], dim=0)
-        
-        if result_tensor is None:
-            result_tensor = torch.from_numpy(results_np[0]).to(torch.float32)
-    else:
-        # Simple concatenation without overlap
-        result_tensor = torch.from_numpy(np.concatenate(results_np, axis=0)).to(torch.float32)
+                chunks = torch.chunk(frames_tensor, num_devices, dim=0)
 
-    # Handle prepend_frames removal (multi-GPU safe - done after all workers complete)
-    if args.prepend_frames > 0:
-        if args.prepend_frames < result_tensor.shape[0]:
-            debug.log(f"Removing {args.prepend_frames} prepended frames from output", category="generation")
-            result_tensor = result_tensor[args.prepend_frames:]
+            for idx, (device_id, chunk_tensor) in enumerate(zip(device_list, chunks)):
+                os.environ["CUDA_VISIBLE_DEVICES"] = device_id
+                p = mp.Process(
+                    target=_worker_process,
+                    args=(idx, device_id, chunk_tensor.cpu().numpy(), shared_args, return_queue, done_barrier),
+                )
+                p.start()
+                workers.append(p)
+
+        # Collect results before joining to prevent deadlock
+        # Tensors arrive via shared memory - copy to numpy while workers still alive
+        results_np = [None] * num_devices
+        collected = 0
+        while collected < num_devices:
+            from queue import Empty
+            try:
+                proc_idx, result_tensor = return_queue.get(timeout=1)
+            except Empty:
+                failed = [p for p in workers if p.exitcode is not None]
+                if failed:
+                    raise RuntimeError('A GPU worker exited without returning a result')
+                continue
+            if isinstance(result_tensor, dict):
+                error_type = torch.cuda.OutOfMemoryError if result_tensor['oom'] else RuntimeError
+                raise error_type(f"GPU worker {proc_idx}: {result_tensor['error']}")
+            results_np[proc_idx] = result_tensor.numpy()
+            collected += 1
+
+        # Release workers now that shared tensors are copied
+        done_barrier.wait()
+
+        # Now safe to join
+        for p in workers:
+            p.join()
+
+        # Concatenate results with overlap blending using shared function
+        if args.temporal_overlap > 0 and num_devices > 1:
+            overlap = args.temporal_overlap
+            result_tensor = None
+
+            for idx, res_np in enumerate(results_np):
+                chunk_tensor = torch.from_numpy(res_np).to(torch.float32)
+
+                if idx == 0:
+                    # First chunk: keep all frames
+                    result_tensor = chunk_tensor
+                else:
+                    # Subsequent chunks: blend overlapping region with accumulated result
+                    if chunk_tensor.shape[0] > overlap and result_tensor.shape[0] >= overlap:
+                        # Get overlapping regions
+                        prev_tail = result_tensor[-overlap:]  # Last N frames from accumulated result
+                        cur_head = chunk_tensor[:overlap]      # First N frames from current chunk
+
+                        # Blend using shared function
+                        blended = blend_overlapping_frames(prev_tail, cur_head, overlap)
+
+                        # Replace tail of result with blended frames, then append rest of chunk
+                        result_tensor = torch.cat([
+                            result_tensor[:-overlap],           # Everything except the tail
+                            blended,                            # Blended overlapping frames
+                            chunk_tensor[overlap:]              # Non-overlapping part of current chunk
+                        ], dim=0)
+                    else:
+                        # Edge case: chunk too small, just append non-overlapping part
+                        if chunk_tensor.shape[0] > overlap:
+                            result_tensor = torch.cat([result_tensor, chunk_tensor[overlap:]], dim=0)
+
+            if result_tensor is None:
+                result_tensor = torch.from_numpy(results_np[0]).to(torch.float32)
         else:
-            debug.log(f"prepend_frames ({args.prepend_frames}) >= total frames ({result_tensor.shape[0]}), skipping removal", 
-                     level="WARNING", category="generation", force=True)
-    
-    return result_tensor
+            # Simple concatenation without overlap
+            result_tensor = torch.from_numpy(np.concatenate(results_np, axis=0)).to(torch.float32)
+
+        return result_tensor
+    finally:
+        if visible_devices is None:
+            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+        else:
+            os.environ['CUDA_VISIBLE_DEVICES'] = visible_devices
+        for process in workers:
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+        return_queue.close()
+        return_queue.cancel_join_thread()
 
 
 # =============================================================================
@@ -1352,8 +1189,7 @@ Examples:
     process_group.add_argument("--load_cap", type=int, default=0,
                         help="Load maximum N frames from video. 0 = load all (default: 0)")
     process_group.add_argument("--chunk_size", type=int, default=0,
-                        help="Frames per chunk for streaming mode. When > 0, processes video in "
-                             "memory-bounded chunks of N frames. 0 = load all frames at once (default: 0)")
+                        help="Maximum input frames per chunk. 0 = automatic finite window (at most 33); memory planning may reduce it")
     process_group.add_argument("--prepend_frames", type=int, default=0,
                         help="Prepend N reversed frames to reduce start artifacts (auto-removed). Default: 0")
     process_group.add_argument("--temporal_overlap", type=int, default=0,
@@ -1375,32 +1211,40 @@ Examples:
     device_group = parser.add_argument_group('Device management')
     device_group.add_argument("--cuda_device", type=str, default=None,
                     help="CUDA device(s): single '0' or multi-GPU '0,1,2'. Default: device 0")
-    device_group.add_argument("--dit_offload_device", type=str, default="none",
+    device_group.add_argument("--dit_offload_device", type=str, default="cpu",
                         help="DiT offload device when idle: 'none' (keep on GPU), 'cpu' (offload to RAM), or GPU ID. "
-                             "Frees VRAM between phases. Required for BlockSwap. Default: none")
-    device_group.add_argument("--vae_offload_device", type=str, default="none",
-                        help="VAE offload device when idle: 'none', 'cpu', or GPU ID. Frees VRAM between phases. Default: none")
+                             "Frees VRAM between phases. Required for BlockSwap. Default: cpu")
+    device_group.add_argument("--vae_offload_device", type=str, default="cpu",
+                        help="VAE offload device when idle: 'none', 'cpu', or GPU ID. Frees VRAM between phases. Default: cpu")
     device_group.add_argument("--tensor_offload_device", type=str, default="cpu",
                         help="Intermediate tensor storage: 'cpu' (recommended), 'none' (keep on GPU), or GPU ID. Default: cpu")
     
+    memory_group = parser.add_argument_group('Memory budgets (GiB; planning estimates, not hard limits)')
+    memory_group.add_argument('--ram_budget_gb', type=float, default=0, help='Total free RAM allowance; 0 = 80%% of available RAM')
+    memory_group.add_argument('--vram_budget_gb', type=float, default=0, help='Free VRAM allowance; 0 = 90%% of available VRAM')
+    memory_group.add_argument('--cache_ram_gb', type=float, default=None, help='CPU model cache cap; default = one quarter of RAM allowance, 0 disables retention')
+    memory_group.add_argument('--cache_vram_gb', type=float, default=0, help='GPU model cache cap; default 0')
+    memory_group.add_argument('--memory_report', type=str, default=None, help='Append phase RSS/CUDA peaks and retry events to JSONL')
+    memory_group.add_argument('--oom_retries', type=int, default=3, help='File restarts with smaller chunk/batch/tile sizes after OOM; 0 disables retries')
+
     # Memory Optimization (BlockSwap)
     blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
     blockswap_group.add_argument("--blocks_to_swap", type=int, default=0,
-                        help="Transformer blocks to swap for VRAM savings. 0-32 (3B) or 0-36 (7B). "
-                             "Requires --dit_offload_device. Default: 0 (disabled)")
+                        help="Requested minimum blocks to swap for VRAM savings. 0-32 (3B) or 0-36 (7B). "
+                             "The planner/retry policy may increase it. Default: 0")
     blockswap_group.add_argument("--swap_io_components", action="store_true",
                         help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
     
     # VAE Tiling
     vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')
-    vae_group.add_argument("--vae_encode_tiled", action="store_true",
-                        help="Enable VAE encode tiling to reduce VRAM during encoding")
+    vae_group.add_argument("--vae_encode_tiled", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable VAE encode tiling to reduce VRAM during encoding (default: enabled)")
     vae_group.add_argument("--vae_encode_tile_size", type=int, default=1024,
                         help="VAE encode tile size in pixels (default: 1024). Applied to both height and width. Only used if --vae_encode_tiled is set")
     vae_group.add_argument("--vae_encode_tile_overlap", type=int, default=128,
                         help="VAE encode tile overlap in pixels (default: 128). Reduces visible seams between tiles. Only used if --vae_encode_tiled is set")
-    vae_group.add_argument("--vae_decode_tiled", action="store_true",
-                        help="Enable VAE decode tiling to reduce VRAM during decoding")
+    vae_group.add_argument("--vae_decode_tiled", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable VAE decode tiling to reduce VRAM during decoding (default: enabled)")
     vae_group.add_argument("--vae_decode_tile_size", type=int, default=1024,
                         help="VAE decode tile size in pixels (default: 1024). Applied to both height and width. Only used if --vae_decode_tiled is set")
     vae_group.add_argument("--vae_decode_tile_overlap", type=int, default=128,
@@ -1435,10 +1279,10 @@ Examples:
     cache_group = parser.add_argument_group('Model caching (batch processing)')
     cache_group.add_argument("--cache_dit", action="store_true",
                         help="Keep DiT model in memory between generations. Works with single-GPU directory processing "
-                             "or multi-GPU streaming (--chunk_size). Requires --dit_offload_device")
+                             "or multi-GPU streaming. Subject to cache memory caps; idle models default to CPU")
     cache_group.add_argument("--cache_vae", action="store_true",
                         help="Keep VAE model in memory between generations. Works with single-GPU directory processing "
-                             "or multi-GPU streaming (--chunk_size). Requires --vae_offload_device")
+                             "or multi-GPU streaming. Subject to cache memory caps; idle models default to CPU")
     
     # Debugging
     debug_group = parser.add_argument_group('Debugging')
@@ -1449,7 +1293,23 @@ Examples:
     if len(sys.argv) == 1:
         sys.argv.append('--help')
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap',
+                 'oom_retries', 'ram_budget_gb', 'vram_budget_gb', 'cache_vram_gb', 'cache_ram_gb'):
+        value = getattr(args, name)
+        if value is not None and (not np.isfinite(value) or value < 0):
+            parser.error(f'--{name} must be finite and nonnegative')
+    if args.batch_size < 1 or args.batch_size % 4 != 1:
+        parser.error('--batch_size must be 4n+1 (1, 5, 9, ...)')
+    if args.resolution < 1 or args.max_resolution < 0:
+        parser.error('Resolution must be positive and max_resolution nonnegative')
+    for phase in ('encode', 'decode'):
+        size, overlap = getattr(args, f'vae_{phase}_tile_size'), getattr(args, f'vae_{phase}_tile_overlap')
+        if size < 128 or size % 64 or overlap < 0 or overlap >= size:
+            parser.error(f'VAE {phase} tile size must be a multiple of 64 >= 128; overlap must be in [0, size)')
+    if args.use_10bit and args.video_backend != 'ffmpeg':
+        parser.error('--10bit requires --video_backend ffmpeg')
+    return args
 
 
 # =============================================================================
@@ -1527,6 +1387,7 @@ def main() -> None:
         debug.log(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set (all)')}", category="device")
         debug.log(f"torch.cuda.device_count(): {torch.cuda.device_count()}", category="device")
     
+    runner_cache = InferenceSession(debug=debug)
     try:
         start_time = time.time()
         
@@ -1562,19 +1423,6 @@ def main() -> None:
             
             debug.log(f"Found {len(media_files)} media files to process", category="file", force=True)
             
-            # Multi-GPU caching requires streaming (workers cache within their chunk loops)
-            if (args.cache_dit or args.cache_vae) and len(device_list) > 1 and args.chunk_size <= 0:
-                debug.log(
-                    "Model caching requires streaming mode (--chunk_size > 0) for multi-GPU. "
-                    "Disabling caching for this run.",
-                    level="WARNING", category="cache", force=True
-                )
-                args.cache_dit = False
-                args.cache_vae = False
-            
-            # Single-GPU: runner_cache persists across files; multi-GPU: workers cache internally
-            runner_cache = {} if (args.cache_dit or args.cache_vae) and len(device_list) == 1 else None
-            
             for idx, file_path in enumerate(media_files, 1):
                 # Visual separation between files (except before first file)
                 if idx > 1:
@@ -1602,7 +1450,7 @@ def main() -> None:
                 # Process with explicit output path and runner cache
                 frames = process_single_file(file_path, args, device_list, output_path, 
                                             format_auto_detected=format_auto_detected,
-                                            runner_cache=runner_cache)
+                                            runner_cache=runner_cache, output_is_resolved=True)
                 total_frames_processed += frames
                 
                 # Restore original format
@@ -1612,29 +1460,6 @@ def main() -> None:
             # Auto-detect output format for single file if not specified
             if format_auto_detected:
                 args.output_format = "mp4" if input_type == "video" else "png"
-            
-            # Caching: single-GPU streaming uses runner_cache, multi-GPU streaming workers cache internally
-            runner_cache = None
-            streaming = args.chunk_size > 0
-            
-            if args.cache_dit or args.cache_vae:
-                if len(device_list) > 1:
-                    if not streaming:
-                        debug.log(
-                            "Model caching requires streaming mode (--chunk_size > 0) for multi-GPU. "
-                            "Disabling caching for this run.",
-                            level="WARNING", category="cache", force=True
-                        )
-                        args.cache_dit = False
-                        args.cache_vae = False
-                elif streaming:
-                    runner_cache = {}
-                else:
-                    debug.log(
-                        "Model caching has no benefit for single file processing (only useful for directories or streaming mode). "
-                        "Consider removing --cache_dit/--cache_vae for single files.",
-                        category="tip", force=True
-                    )
             
             frames = process_single_file(args.input, args, device_list, args.output,
                                         format_auto_detected=format_auto_detected,
@@ -1663,6 +1488,7 @@ def main() -> None:
         sys.exit(1)
     
     finally:
+        runner_cache.close()
         debug.log(f"Process {os.getpid()} terminating - VRAM will be automatically freed", category="cleanup", force=True)
 
         # print footer

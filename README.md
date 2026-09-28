@@ -1,6 +1,6 @@
 # SeedVR2 Lite — standalone CLI
 
-SeedVR2 image and video upscaling from a Linux command line. The existing inference pipeline supports one or several NVIDIA GPUs, directory processing, bounded-memory video chunks, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
+SeedVR2 image and video upscaling from a Linux command line. The existing inference pipeline supports one or several NVIDIA GPUs, directory processing, bounded single-GPU video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
 
 This fork targets the current Google Colab runtime: Ubuntu 24.04, Python 3.13, PyTorch 2.11.0+cu128, and the CUDA 12.8 toolkit. The "CUDA Version 13.0" reported by nvidia-smi describes the driver capability; it is not the CUDA build used by PyTorch.
 
@@ -28,8 +28,9 @@ python inference_cli.py examples/inputs/Sadhu_320x478.png \
 
 # Long video: limit memory use and write MP4 with FFmpeg.
 python inference_cli.py /content/drive/MyDrive/SeedVR2/input/video.mp4 \
-  --resolution 1080 --batch_size 33 --chunk_size 330 \
+  --resolution 1080 --batch_size 5 --chunk_size 33 \
   --temporal_overlap 3 --video_backend ffmpeg \
+  --memory_report /content/drive/MyDrive/SeedVR2/output/memory.jsonl \
   --model_dir /content/drive/MyDrive/SeedVR2/models \
   --output /content/drive/MyDrive/SeedVR2/output/video.mp4
 
@@ -53,20 +54,29 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --dit_model | Choose a 3B or 7B FP16, FP8, or GGUF model; the default is 3B FP8. |
 | --resolution | Target short edge in pixels. |
 | --batch_size | Frames per model batch; use 1, 5, 9, 13, 17, and so on (4n+1). |
-| --chunk_size | Process long videos in chunks instead of keeping all frames in RAM. |
-| --vae_encode_tiled / --vae_decode_tiled | Reduce peak VRAM for large frames. |
+| --chunk_size | Maximum input window; 0 automatically chooses a finite window of at most 33 frames. |
+| --vae_encode_tiled / --vae_decode_tiled | Tiling is enabled by default; use --no-vae_encode_tiled / --no-vae_decode_tiled to opt out initially. |
 | --blocks_to_swap / --dit_offload_device cpu | Offload DiT blocks to system RAM when VRAM is limited. |
-| --cache_dit / --cache_vae | Reuse loaded models for directory or chunk processing. |
+| --cache_dit / --cache_vae | Request model reuse within the RAM/VRAM cache caps. |
+| --ram_budget_gb / --vram_budget_gb | Set memory planning allowances (GiB); 0 uses available-memory defaults. |
+| --cache_ram_gb / --cache_vram_gb | Limit retained model storage; 0 disables that cache tier. |
+| --memory_report / --oom_retries | Record phase peaks to JSONL; retry caught OOMs with smaller workloads. |
 | --attention_mode | PyTorch SDPA is the default. Optional Flash/Sage backends require separate compatible installations. |
 | --compile_dit / --compile_vae | Enable torch.compile; first-run compilation can take time. |
 | --video_backend ffmpeg / --10bit | Encode MP4 using FFmpeg, optionally with 10-bit x265 output. |
 | --debug | Show environment, timing, VRAM, and processing details. |
 
 Use --help for the complete option list. Larger models, batches, and output resolutions require more VRAM. Start with a short sample at a modest resolution before processing a long video.
-https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler#command-line-arguments
+
+The [upstream CLI reference](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler#command-line-arguments) provides background on inherited options; this project's `--help` describes the supported CLI.
+
+CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels. Multi-GPU output collection still uses memory proportional to its segment results.
+
+See [memory behavior, measured buffer baseline and Colab validation](docs/memory.md) for the budgeting policy, cache limits, precision path and remaining GPU checks.
+
 ## Development checks
 
-Run `python -m compileall -q inference_cli.py src tests` and `python -m unittest discover -s tests -v` before proposing changes. The Colab notebook's short video sample checks the full inference path on the target GPU runtime.
+Install `requirements-dev.txt`, then run `python -m compileall -q inference_cli.py src tests tools`, `python -m pytest -q tests`, and `python tools/benchmark_memory.py`. The CPU CI workflow uses Python 3.13 / PyTorch 2.11 and checks that streaming output buffers remain bounded as clip length grows. The Colab notebook's short video sample checks the full inference path on the target GPU runtime.
 
 ## Models and attribution
 

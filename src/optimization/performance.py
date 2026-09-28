@@ -44,76 +44,10 @@ def optimized_channels_to_second(tensor):
 
 
 def optimized_video_rearrange(video_tensors: List[torch.Tensor]) -> List[torch.Tensor]:
-    """
-    🚀 OPTIMIZED version of video rearrangement
-    Replaces slow loops with vectorized operations
-    
-    Transforms:
-    - 3D: c h w -> t c h w (with t=1)  
-    - 4D: c t h w -> t c h w
-    
-    Expected gains: 5-10x faster than naive loops
-    
-    Args:
-        video_tensors: List of video tensors to rearrange
-        
-    Returns:
-        List of rearranged tensors in t c h w format
-        
-    Raises:
-        ValueError: If video tensor has invalid dimensions (not 3D or 4D)
-    """
-    if not video_tensors:
-        return []
-    
-    # 🔍 Analyze dimensions to optimize processing
-    videos_3d = []
-    videos_4d = []
-    indices_3d = []
-    indices_4d = []
-    
-    for i, video in enumerate(video_tensors):
-        if video.ndim == 3:
-            videos_3d.append(video)
-            indices_3d.append(i)
-        elif video.ndim == 4:
-            videos_4d.append(video)
-            indices_4d.append(i)
-        else:
-            raise ValueError(f"Video tensor at index {i} has invalid dimensions: {video.ndim}. Expected 3D or 4D.")
-    
-    # 🎯 Prepare final result
-    samples = [None] * len(video_tensors)
-    
-    # 🚀 BATCH PROCESSING for 3D videos (c h w -> 1 c h w)
-    if videos_3d:
-        # Stack + permute (faster than rearrange)
-        # c h w -> c 1 h w -> 1 c h w
-        batch_3d = torch.stack([v.unsqueeze(1) for v in videos_3d])  # [batch, c, 1, h, w]
-        batch_3d = batch_3d.permute(0, 2, 1, 3, 4)  # [batch, 1, c, h, w]
-        
-        for i, idx in enumerate(indices_3d):
-            samples[idx] = batch_3d[i]  # [1, c, h, w]
-    
-    # 🚀 BATCH PROCESSING for 4D videos (c t h w -> t c h w)  
-    if videos_4d:
-        # Check if all 4D videos have the same shape for maximum optimization
-        shapes = [v.shape for v in videos_4d]
-        if len(set(shapes)) == 1:
-            # 🎯 MAXIMUM OPTIMIZATION: All shapes identical
-            # Stack + permute in single operation
-            batch_4d = torch.stack(videos_4d)  # [batch, c, t, h, w]
-            batch_4d = batch_4d.permute(0, 2, 1, 3, 4)  # [batch, t, c, h, w]
-            
-            for i, idx in enumerate(indices_4d):
-                samples[idx] = batch_4d[i]  # [t, c, h, w]
-        else:
-            # 🔄 FALLBACK: Different shapes, optimized individual processing
-            for i, idx in enumerate(indices_4d):
-                # Use permute instead of rearrange (faster)
-                samples[idx] = videos_4d[i].permute(1, 0, 2, 3)  # c t h w -> t c h w
-    
-    return samples
+    """Return CTHW -> TCHW (or CHW -> 1CHW) views without stacking samples."""
+    # Each pipeline call contains one sample; permute/unsqueeze are views.
+    # Stacking equally shaped samples allocated another full decoded batch.
+    return [optimized_single_video_rearrange(video) for video in video_tensors]
 
 
 def optimized_single_video_rearrange(video: torch.Tensor) -> torch.Tensor:

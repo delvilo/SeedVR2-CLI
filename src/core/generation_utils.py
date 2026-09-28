@@ -201,7 +201,7 @@ def compute_generation_info(
     ctx['total_frames'] = total_frames
     
     # Setup transform and compute dimensions on final frame count
-    sample_frame = images[0].permute(2, 0, 1).unsqueeze(0)
+    sample_frame = images[0].permute(2, 0, 1).unsqueeze(0).to(torch.float32)
     true_h, true_w, padded_h, padded_w = setup_video_transform(
         ctx, resolution, max_resolution, debug, sample_frame
     )
@@ -409,8 +409,7 @@ def prepare_runner(
     ctx: Dict[str, Any],
     dit_cache: bool = False,
     vae_cache: bool = False,
-    dit_id: Optional[int] = None,
-    vae_id: Optional[int] = None,
+    session=None,
     block_swap_config: Optional[Dict[str, Any]] = None,
     encode_tiled: bool = False,
     encode_tile_size: Optional[Tuple[int, int]] = None,
@@ -435,8 +434,7 @@ def prepare_runner(
         ctx: Generation context from setup_generation_context
         dit_cache: Whether to cache DiT model between runs
         vae_cache: Whether to cache VAE model between runs
-        dit_id: Node instance ID for DiT model caching
-        vae_id: Node instance ID for VAE model caching
+        session: InferenceSession owning reusable models, without generation state
         block_swap_config: Optional BlockSwap configuration for DiT memory optimization
         encode_tiled: Enable tiled encoding to reduce VRAM during VAE encoding
         encode_tile_size: Tile size for encoding (height, width)
@@ -453,11 +451,7 @@ def prepare_runner(
         Tuple['VideoDiffusionInfer', Dict[str, Any]]: Tuple containing:
             - VideoDiffusionInfer: Configured runner instance with models loaded and settings applied
             - Dict[str, Any]: Cache context dictionary containing cache state and metadata with keys:
-                - 'global_cache': GlobalModelCache instance
-                - 'dit_cache', 'vae_cache': Caching enabled flags
-                - 'dit_id', 'vae_id': Node IDs for cache lookup
                 - 'cached_dit', 'cached_vae': Cached model instances (if found)
-                - 'reusing_runner': Flag indicating if runner template was reused
         
     Features:
         - Independent DiT and VAE caching for flexible memory management
@@ -479,8 +473,7 @@ def prepare_runner(
         ctx=ctx,
         dit_cache=dit_cache,
         vae_cache=vae_cache,
-        dit_id=dit_id,
-        vae_id=vae_id,
+        session=session,
         block_swap_config=block_swap_config,
         encode_tiled=encode_tiled,
         encode_tile_size=encode_tile_size,

@@ -164,7 +164,7 @@ def detect_edges_batch(
             sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
             sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
             edge = np.sqrt(sobelx**2 + sobely**2)
-            edge = (edge / edge.max() * 255).astype(np.uint8)
+            edge = (edge / max(float(edge.max()), 1e-8) * 255).astype(np.uint8)
         else:
             edge = cv2.Canny(gray, 50, 150)
         

@@ -1269,27 +1269,36 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
 
     def slicing_decode(self, z: torch.Tensor) -> torch.Tensor:
         sp_size = get_sequence_parallel_world_size()
-        if self.use_slicing and (z.shape[2] - 1) > self.slicing_latent_min_size * sp_size:
-            z_slices = z[:, :, 1:].split(split_size=self.slicing_latent_min_size * sp_size, dim=2)
-            decoded_slices = [
-                self._decode(
-                    torch.cat((z[:, :, :1], z_slices[0]), dim=2),
-                    memory_state=MemoryState.INITIALIZING
-                )
-            ]
-            for z_idx in range(1, len(z_slices)):
-                decoded_slices.append(
-                    self._decode(z_slices[z_idx], memory_state=MemoryState.ACTIVE)
-                )
-            out = torch.cat(decoded_slices, dim=2)
-            # Clear memory efficiently
-            modules_with_memory = [m for m in self.modules() 
-                                if isinstance(m, InflatedCausalConv3d) and m.memory is not None]
-            for m in modules_with_memory:
-                m.memory = None
-            return out
-        else:
+        if not self.use_slicing or (z.shape[2] - 1) <= self.slicing_latent_min_size * sp_size:
             return self._decode(z)
+        z_slices = z[:, :, 1:].split(self.slicing_latent_min_size * sp_size, dim=2)
+        out = None
+        offset = 0
+        try:
+            for index, latent_slice in enumerate(z_slices):
+                if index == 0:
+                    latent_slice = torch.cat((z[:, :, :1], latent_slice), dim=2)
+                decoded = self._decode(latent_slice, memory_state=(
+                    MemoryState.INITIALIZING if index == 0 else MemoryState.ACTIVE))
+                if out is None:
+                    factor = getattr(self, 'temporal_downsample_factor',
+                                     (decoded.shape[2] - 1) // (latent_slice.shape[2] - 1))
+                    frames = (z.shape[2] - 1) * factor + 1
+                    device = getattr(self, 'tensor_offload_device', None) or decoded.device
+                    out = torch.empty((decoded.shape[0], decoded.shape[1], frames,
+                                       *decoded.shape[3:]), device=device, dtype=decoded.dtype)
+                count = decoded.shape[2]
+                out[:, :, offset:offset + count].copy_(decoded)
+                offset += count
+                del decoded
+            if offset != out.shape[2]:
+                raise RuntimeError(f'VAE temporal decode length mismatch: {offset} != {out.shape[2]}')
+            return out
+        finally:
+            # Causal-convolution state must not survive an interrupted decode.
+            for module in self.modules():
+                if isinstance(module, InflatedCausalConv3d):
+                    module.memory = None
 
     def tiled_encode(self, x: torch.Tensor, tile_size: Tuple[int, int] = (512, 512), 
                      tile_overlap: Tuple[int, int] = (64, 64)) -> torch.Tensor:
@@ -1610,10 +1619,8 @@ class VideoAutoencoderKL(diffusers.AutoencoderKL):
                 result[:, :, : decoded_tile.shape[2], y_out:y_out_end, x_out:x_out_end] += decoded_tile
                 count[:, :, :, y_out:y_out_end, x_out:x_out_end].addcmul_(weight_h_5d, weight_w_5d)
 
-        # Move result back to inference device if needed and normalize
-        if result.device != z.device:
-            result = result.to(z.device)
-            count = count.to(z.device)
+        # Normalize on the accumulation device. Moving this full-resolution
+        # result back to CUDA would defeat CPU tile accumulation.
         result.div_(count.clamp(min=1e-6)) # In-place normalize
 
         if z.shape[2] == 1:  # single frame
