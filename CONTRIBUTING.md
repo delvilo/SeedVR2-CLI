@@ -1,34 +1,9 @@
-# Contributing to ComfyUI-SeedVR2_VideoUpscaler
+# Contributing
 
-Thank you for your interest in contributing to ComfyUI-SeedVR2_VideoUpscaler! We appreciate your effort and to help us incorporate your contribution in the best way possible, please follow the following contribution guidelines.
+This repository supports the standalone SeedVR2 command line on Linux with NVIDIA CUDA.
 
-## Reporting Bugs
+When reporting a bug, include the CLI command, a short input description, the full error, and the environment information printed by the --debug option. Do not upload private videos or model weights.
 
-If you find a bug in the project, we encourage you to report it. Here's how:
+Open a pull request against main with a focused change. Run the Python syntax check and lightweight tests listed in the README before submitting. GPU behavior should be checked on the documented Colab runtime.
 
-1. First, check the [existing Issues](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler/issues) to see if the issue has already been reported. If it has, please add a comment to the existing issue rather than creating a new one.
-2. If you can't find an existing issue that matches your bug, create a new issue. Make sure to include as many details as possible so we can understand and reproduce the problem.
-
-## Proposing Changes
-
-We welcome code contributions from the community. Here's how to propose changes:
-
-1. Fork this repository to your own GitHub account.
-2. Create a new branch on your fork for your changes.
-3. Make your changes in this branch.
-4. When you are ready, submit a pull request to the **`main`** branch.
-
-We use the GitHub Flow workflow.
-
-Before submitting a pull request, please make sure your code adheres to the project's coding conventions and it has passed all tests. If you are adding features, please also add appropriate tests.
-
-## Contact
-
-If you have any questions or need help, please reach out to the developers:
-
-- **NumZ**: Discord NumZ#7184
-- **adrientoupet** from AInVFX: [YouTube Channel](https://www.youtube.com/@AInVFX)
-
-You can also open an issue on GitHub for general questions and discussions.
-
-Thank you again for your contribution !
+Issues and pull requests: https://github.com/delvilo/SeedVR2Lite_VideoUpscaler

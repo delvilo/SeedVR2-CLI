@@ -56,9 +56,7 @@ def validate_blockswap_config(
     """
     Validate and potentially modify BlockSwap configuration.
     
-    Performs platform-specific validation and configuration adjustment:
-    - On macOS (MPS): Auto-disables BlockSwap since unified memory makes it meaningless
-    - On other platforms: Validates that offload_device is properly configured
+    Validates that offload_device is properly configured.
     
     This is the single authoritative validation point for BlockSwap configuration,
     called early in configure_runner() before any model loading.
@@ -73,27 +71,13 @@ def validate_blockswap_config(
         Validated/modified block_swap_config (may be None or modified copy)
         
     Raises:
-        ValueError: If BlockSwap is enabled but offload_device is invalid (non-MPS only)
+        ValueError: If BlockSwap is enabled but offload_device is invalid
     """
     if not is_blockswap_enabled(block_swap_config):
         return block_swap_config
     
     blocks_to_swap = block_swap_config.get("blocks_to_swap", 0)
     swap_io_components = block_swap_config.get("swap_io_components", False)
-    
-    # Check for macOS unified memory - BlockSwap is meaningless there
-    if dit_device.type == "mps":
-        debug.log(
-            f"BlockSwap disabled: macOS uses unified memory (no separate VRAM/RAM). "
-            f"Ignoring blocks_to_swap={blocks_to_swap}, swap_io_components={swap_io_components}",
-            level="WARNING", category="blockswap", force=True
-        )
-        # Return disabled config
-        return {
-            **block_swap_config,
-            "blocks_to_swap": 0,
-            "swap_io_components": False
-        }
     
     # Validate offload_device is set and different from dit_device
     offload_device_valid = (

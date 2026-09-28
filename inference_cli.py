@@ -31,8 +31,7 @@ Usage:
     For complete usage examples, run: python inference_cli.py --help
 
 Requirements:
-    • Python 3.10+
-    • PyTorch 2.4+ with CUDA 12.1+ (NVIDIA) or MPS (Apple Silicon)
+    • Ubuntu 24.04, Python 3.13, PyTorch 2.11.0+cu128
     • 16GB+ VRAM recommended (8GB minimum with BlockSwap)
     • OpenCV, NumPy for video I/O
 
@@ -48,7 +47,6 @@ import sys
 import os
 import argparse
 import time
-import platform
 import multiprocessing as mp
 from typing import Dict, Any, List, Optional, Tuple, Literal, Generator
 from datetime import datetime
@@ -66,43 +64,19 @@ os.environ['PYTHONPATH'] = script_dir + ':' + os.environ.get('PYTHONPATH', '')
 if mp.get_start_method(allow_none=True) != 'spawn':
     mp.set_start_method('spawn', force=True)
 
-# Configure platform-specific memory management before heavy imports
-# Must be set BEFORE import torch
-if platform.system() == "Darwin":
-    # MPS allocator requires: low_watermark <= high_watermark
-    # Setting both to 0.0 disables PyTorch memory limits, letting macOS manage memory
-    os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
-    os.environ.setdefault("PYTORCH_MPS_LOW_WATERMARK_RATIO", "0.0")
-else:
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
-
-    # Pre-parse arguments that must be handled before torch import
-    _pre_parser = argparse.ArgumentParser(add_help=False)
-    _pre_parser.add_argument("--cuda_device", type=str, default=None)
-    _pre_args, _ = _pre_parser.parse_known_args()
-    
-    if _pre_args.cuda_device is not None:
-        device_list_env = [x.strip() for x in _pre_args.cuda_device.split(',') if x.strip()!='']
-        
-        # Skip validation if CUDA_VISIBLE_DEVICES is already set (worker process)
-        if os.environ.get("CUDA_VISIBLE_DEVICES") is None:
-            # Temporary torch import for CUDA device validation only
-            # Must happen before setting CUDA_VISIBLE_DEVICES and before main torch import
-            import torch as _torch_check
-            if _torch_check.cuda.is_available():
-                available_count = _torch_check.cuda.device_count()
-                invalid_devices = [d for d in device_list_env if not d.isdigit() or int(d) >= available_count]
-                if invalid_devices:
-                    print(f"❌ [ERROR] Invalid CUDA device ID(s): {', '.join(invalid_devices)}. "
-                        f"Available devices: 0-{available_count-1} (total: {available_count})")
-                    sys.exit(1)
-            else:
-                print("❌ [ERROR] CUDA is not available on this system. Cannot use --cuda_device argument.")
-                sys.exit(1)
-            
-            # Set CUDA_VISIBLE_DEVICES for single GPU after validation
-            if len(device_list_env) == 1:
-                os.environ["CUDA_VISIBLE_DEVICES"] = device_list_env[0]
+# Set CUDA visibility before importing torch so the selected GPU maps to cuda:0.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "backend:cudaMallocAsync")
+_pre_parser = argparse.ArgumentParser(add_help=False)
+_pre_parser.add_argument("--cuda_device", type=str, default=None)
+_pre_args, _ = _pre_parser.parse_known_args()
+_selected_single_device_masked = False
+if _pre_args.cuda_device is not None:
+    device_list_env = [x.strip() for x in _pre_args.cuda_device.split(",")]
+    if not device_list_env or any(not item.isdigit() for item in device_list_env):
+        raise SystemExit("--cuda_device expects numeric CUDA IDs, such as 0 or 0,1")
+    if len(device_list_env) == 1 and "CUDA_VISIBLE_DEVICES" not in os.environ:
+        os.environ["CUDA_VISIBLE_DEVICES"] = device_list_env[0]
+        _selected_single_device_masked = True
 
 # Heavy dependency imports after environment configuration
 import torch
@@ -114,7 +88,8 @@ import shutil
 # Project imports
 from src.utils.downloads import download_weight
 from src.utils.model_registry import get_available_dit_models, DEFAULT_DIT, DEFAULT_VAE
-from src.utils.constants import SEEDVR2_FOLDER_NAME
+from src.utils.constants import get_base_cache_dir
+from src.utils.runtime import validate_runtime
 from src.core.generation_utils import (
     setup_generation_context, 
     prepare_runner, 
@@ -131,7 +106,7 @@ from src.core.generation_phases import (
     postprocess_all_batches
 )
 from src.utils.debug import Debug
-from src.optimization.memory_manager import clear_memory, get_gpu_backend, is_cuda_available
+from src.optimization.memory_manager import clear_memory
 debug = Debug(enabled=False)  # Will be enabled via --debug CLI flag
 
 
@@ -213,26 +188,19 @@ class FFMPEGVideoWriter:
 # Device Management Helpers
 # =============================================================================
 
-def _device_id_to_name(device_id: str, platform_type: str = None) -> str:
+def _device_id_to_name(device_id: str, platform_type: str = "cuda") -> str:
     """
     Convert device ID to full device name.
     
     Args:
         device_id: Device ID ("0", "1") or special value ("cpu", "none")
-        platform_type: Override platform type ("cuda", "mps", "cpu")
+        platform_type: CUDA backend
     
     Returns:
-        Full device name ("cuda:0", "mps:0", "cpu", "none")
+        Full device name ("cuda:0", "cpu", "none")
     """
     if device_id in ("cpu", "none"):
         return device_id
-    
-    if platform_type is None:
-        platform_type = get_gpu_backend()
-    
-    # MPS typically doesn't use indices
-    if platform_type == "mps":
-        return "mps"
     
     return f"{platform_type}:{device_id}"
 
@@ -256,7 +224,7 @@ def _parse_offload_device(offload_arg: str, platform_type: str = None, cache_ena
     if offload_arg == "cpu":
         return "cpu"
     
-    # If already a full device name (cuda:1, mps:0), return as-is
+    # If already a full device name (cuda:1), return as-is
     if ":" in offload_arg:
         return offload_arg
     
@@ -851,8 +819,8 @@ def _process_frames_core(
     Returns:
         Upscaled frames tensor [T', H', W', C], Float32, range [0,1]
     """    
-    # Determine platform and convert device IDs to full names
-    platform_type = get_gpu_backend()
+    # Convert CUDA device IDs to full names
+    platform_type = "cuda"
     inference_device = _device_id_to_name(device_id, platform_type)
     
     # Parse offload devices (with caching defaults)
@@ -907,7 +875,7 @@ def _process_frames_core(
         }
     
     # Prepare runner with caching support
-    model_dir = args.model_dir if args.model_dir is not None else f"./models/{SEEDVR2_FOLDER_NAME}"
+    model_dir = args.model_dir if args.model_dir is not None else get_base_cache_dir()
     
     # Use fixed IDs for CLI caching when enabled
     dit_id = "cli_dit" if cache_dit else None
@@ -1004,7 +972,7 @@ def _process_frames_core(
     result_tensor = ctx['final_video']
     
     # Convert to CPU and compatible dtype
-    if result_tensor.is_cuda or result_tensor.is_mps:
+    if result_tensor.is_cuda:
         result_tensor = result_tensor.cpu()
     if result_tensor.dtype in (torch.bfloat16, torch.float8_e4m3fn, torch.float8_e5m2):
         result_tensor = result_tensor.to(torch.float32)
@@ -1303,8 +1271,7 @@ def parse_arguments() -> argparse.Namespace:
         Parsed arguments namespace with all CLI parameters
     
     Note:
-        - cuda_device argument only available on non-macOS systems
-        - Default model directory resolves to "models/SEEDVR2" if not specified
+        - Default model directory resolves to the repo's models/SEEDVR2 if not specified
     """
     
     # Get the actual invocation path for usage examples
@@ -1357,7 +1324,7 @@ Examples:
                         help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
                          "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
     io_group.add_argument("--model_dir", type=str, default=None,
-                        help=f"Model directory (default: ./models/{SEEDVR2_FOLDER_NAME})")
+                        help="Model directory (default: $SEEDVR2_MODEL_DIR or repo/models/SEEDVR2)")
     
     # Model Selection
     model_group = parser.add_argument_group('Model selection')
@@ -1406,9 +1373,8 @@ Examples:
     
     # Device Management
     device_group = parser.add_argument_group('Device management')
-    if platform.system() != "Darwin":
-        device_group.add_argument("--cuda_device", type=str, default=None,
-                        help="CUDA device(s): single '0' or multi-GPU '0,1,2'. Default: device 0")
+    device_group.add_argument("--cuda_device", type=str, default=None,
+                    help="CUDA device(s): single '0' or multi-GPU '0,1,2'. Default: device 0")
     device_group.add_argument("--dit_offload_device", type=str, default="none",
                         help="DiT offload device when idle: 'none' (keep on GPU), 'cpu' (offload to RAM), or GPU ID. "
                              "Frees VRAM between phases. Required for BlockSwap. Default: none")
@@ -1421,10 +1387,9 @@ Examples:
     blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
     blockswap_group.add_argument("--blocks_to_swap", type=int, default=0,
                         help="Transformer blocks to swap for VRAM savings. 0-32 (3B) or 0-36 (7B). "
-                             "Requires --dit_offload_device. Not available on macOS. Default: 0 (disabled)")
+                             "Requires --dit_offload_device. Default: 0 (disabled)")
     blockswap_group.add_argument("--swap_io_components", action="store_true",
-                        help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device. "
-                             "Not available on macOS")
+                        help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
     
     # VAE Tiling
     vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')
@@ -1513,12 +1478,17 @@ def main() -> None:
     """
     # Parse arguments
     args = parse_arguments()
+    try:
+        validate_runtime()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+    args.model_dir = os.path.abspath(os.path.expanduser(args.model_dir or get_base_cache_dir()))
 
     # Update debug instance with --debug flag
     debug.enabled = args.debug
 
     # print header
-    debug.print_header(cli=True)
+    debug.print_header()
     
     debug.log("Arguments:", category="setup")
     for key, value in vars(args).items():
@@ -1540,42 +1510,32 @@ def main() -> None:
     
     # Inform about caching defaults
     if args.cache_dit and args.dit_offload_device == "none":
-        offload_target = "system memory (CPU)" if get_gpu_backend() != "mps" else "unified memory"
         debug.log(
-            f"DiT caching enabled: Using default {offload_target} for offload. "
+            "DiT caching enabled: Using default system memory (CPU) for offload. "
             "Set --dit_offload_device explicitly to use a different device.",
             category="cache", force=True
         )
     
     if args.cache_vae and args.vae_offload_device == "none":
-        offload_target = "system memory (CPU)" if get_gpu_backend() != "mps" else "unified memory"
         debug.log(
-            f"VAE caching enabled: Using default {offload_target} for offload. "
+            "VAE caching enabled: Using default system memory (CPU) for offload. "
             "Set --vae_offload_device explicitly to use a different device.",
             category="cache", force=True
         )
 
     if args.debug:
-        if platform.system() == "Darwin":
-            debug.log("You are running on macOS and will use the MPS backend!", category="info", force=True)
-        else:
-            # Show actual CUDA device visibility
-            debug.log(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set (all)')}", category="device")
-            if is_cuda_available():
-                debug.log(f"torch.cuda.device_count(): {torch.cuda.device_count()}", category="device")
-                debug.log(f"Using device index 0 inside script (mapped to selected GPU)", category="device")
+        debug.log(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'Not set (all)')}", category="device")
+        debug.log(f"torch.cuda.device_count(): {torch.cuda.device_count()}", category="device")
     
     try:
         start_time = time.time()
         
         # Parse GPU list
-        if platform.system() == "Darwin":
-            device_list = ["0"]
-        else:
-            if args.cuda_device:
-                device_list = [d.strip() for d in str(args.cuda_device).split(',') if d.strip()]
-            else:
-                device_list = ["0"]
+        device_list = [d.strip() for d in args.cuda_device.split(",")] if args.cuda_device else ["0"]
+        if _selected_single_device_masked:
+            device_list = ["0"]  # Selected physical GPU is now the only visible device.
+        if len(device_list) != len(set(device_list)) or any(int(d) >= torch.cuda.device_count() for d in device_list):
+            raise ValueError(f"Requested CUDA devices {device_list}, but only {torch.cuda.device_count()} visible")
         if args.debug:
             debug.log(f"Using devices: {device_list}", category="device")
         
