@@ -16,7 +16,7 @@ The new upstream Q8 entries are retained with corrected download identities: the
 | 6. Model cache | One `InferenceSession` owns the runner, keyed by checkpoint path/size/mtime, devices and compute dtype. No global cache or node IDs. Count distinct parameter/buffer storage and evict models when the configured cache allowance is exceeded. Generation contexts and outputs never enter the cache. |
 | 7. Planning and OOM recovery | Choose finite chunk, 4n+1 batch, tile and BlockSwap settings from available RAM/VRAM and checkpoint estimates. On a caught OOM, discard temporary output and restart the file with a smaller workload and CPU offload. |
 
-The output buffer bound applies to **single-GPU execution**. Existing multi-GPU workers still collect their segment results and the parent assembles them. Their error propagation and cleanup are improved, but replacing that transport belongs to the separate multi-GPU refactor.
+The output buffer bound applies to the CLI's supported execution mode: one GPU streams finalized batches to the writer.
 
 ## Defaults and controls
 

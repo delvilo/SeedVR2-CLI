@@ -1,6 +1,6 @@
 # SeedVR2 Lite — standalone CLI
 
-SeedVR2 image and video upscaling from a Linux command line. The existing inference pipeline supports one or several NVIDIA GPUs, directory processing, bounded single-GPU video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
+SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
 
 This fork targets the current Google Colab runtime: Ubuntu 24.04, Python 3.13, PyTorch 2.11.0+cu128, and the CUDA 12.8 toolkit. The "CUDA Version 13.0" reported by nvidia-smi describes the driver capability; it is not the CUDA build used by PyTorch.
 
@@ -40,9 +40,6 @@ python inference_cli.py /content/drive/MyDrive/SeedVR2/input \
   --model_dir /content/drive/MyDrive/SeedVR2/models \
   --cache_dit --cache_vae --dit_offload_device cpu --vae_offload_device cpu
 
-# Multi-GPU processing, when the runtime exposes two CUDA GPUs.
-python inference_cli.py video.mp4 --cuda_device 0,1 \
-  --batch_size 33 --temporal_overlap 3
 ~~~
 
 When --model_dir is omitted, models are stored under **models/SEEDVR2** in the repository. The SEEDVR2_MODEL_DIR environment variable can set another default. --output controls the result path; omit it to use the CLI's automatically generated filename.
@@ -65,12 +62,11 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --compile_dit / --compile_vae | Enable torch.compile; first-run compilation can take time. |
 | --video_backend ffmpeg / --10bit | Encode MP4 using FFmpeg, optionally with 10-bit x265 output. |
 | --debug | Show environment, timing, VRAM, and processing details. |
+| --cuda_device | Select one visible CUDA device index; defaults to device 0. |
 
 Use --help for the complete option list. Larger models, batches, and output resolutions require more VRAM. Start with a short sample at a modest resolution before processing a long video.
 
-The [upstream CLI reference](https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler#command-line-arguments) provides background on inherited options; this project's `--help` describes the supported CLI.
-
-CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels. Multi-GPU output collection still uses memory proportional to its segment results.
+CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels.
 
 See [memory behavior, measured buffer baseline and Colab validation](docs/memory.md) for the budgeting policy, cache limits, precision path and remaining GPU checks.
 

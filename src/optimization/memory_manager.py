@@ -34,35 +34,6 @@ def get_gpu_backend() -> str:
     return 'cpu'
 
 
-def get_device_list(include_none: bool = False, include_cpu: bool = False) -> List[str]:
-    """
-    Get list of available compute devices for SeedVR2
-    
-    Args:
-        include_none: If True, prepend "none" to the device list (for offload options)
-        include_cpu: If True, include "cpu" in the device list (for offload options only)
-        
-    Returns:
-        List of device strings (e.g., ["cuda:0", "cuda:1"] or ["none", "cpu", "cuda:0", "cuda:1"])
-    """
-    devs = []
-    try:
-        if is_cuda_available():
-            devs += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
-    except Exception:
-        pass
-    
-    # Build result list with optional prefixes
-    result = []
-    if include_none:
-        result.append("none")
-    
-    if include_cpu:
-        result.append("cpu")
-    
-    result.extend(devs)
-    
-    return result if result else []
 
 
 def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]:
