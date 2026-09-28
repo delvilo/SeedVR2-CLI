@@ -4,7 +4,7 @@ tqdm
 psutil
 einops
 omegaconf>=2.3.0
-diffusers==0.33.1
+diffusers>=0.33.1
 rotary_embedding_torch>=0.5.3
 opencv-python
 gguf
