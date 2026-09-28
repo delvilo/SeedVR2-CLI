@@ -12,7 +12,7 @@ This module orchestrates model configuration, caching, and runtime settings:
 
 Key Features:
 - Unified runner configuration via configure_runner()
-- Global model caching with name validation
+- Session-owned model caching with checkpoint identity validation
 - Configuration change detection to avoid unnecessary reloads
 - Meta device initialization for memory efficiency
 - Dynamic configuration updates (BlockSwap, torch.compile, attention mode)
@@ -26,8 +26,6 @@ Main Functions:
 - _update_vae_config: Update VAE configuration on cached models
 
 Cache Management:
-- _initialize_cache_context: Initialize cache with validation
-- _acquire_runner: Get or create runner instance
 - _create_new_runner: Create new runner with config
 - _configure_runner_settings: Configure runner settings for tiling/compile/BlockSwap
 
@@ -66,7 +64,7 @@ from .model_loader import (
     script_directory
 )
 from .infer import VideoDiffusionInfer
-from .model_cache import get_global_cache
+from .session import InferenceSession, checkpoint_identity
 from ..common.config import load_config
 from ..models.video_vae_v3.modules.causal_inflation_lib import InflatedCausalConv3d
 from ..optimization.compatibility import (
@@ -529,160 +527,6 @@ def _update_vae_config(
     )
 
 
-def _initialize_cache_context(
-    dit_cache: bool,
-    vae_cache: bool,
-    dit_id: Optional[int],
-    vae_id: Optional[int],
-    dit_model: str,
-    vae_model: str,
-    debug: Optional['Debug'] = None
-) -> Dict[str, Any]:
-    """
-    Initialize cache context with global cache lookups and model name validation.
-    
-    Checks the global cache for existing DiT/VAE models and validates that cached
-    models match the requested model names. Removes stale cache entries when model
-    names don't match.
-    
-    Args:
-        dit_cache: Whether DiT caching is enabled
-        vae_cache: Whether VAE caching is enabled
-        dit_id: Node ID for DiT model lookup
-        vae_id: Node ID for VAE model lookup
-        dit_model: Requested DiT model filename for validation
-        vae_model: Requested VAE model filename for validation
-        debug: Debug instance for logging
-        
-    Returns:
-        Dict[str, Any]: Cache context dictionary containing:
-            - global_cache: GlobalModelCache instance
-            - dit_cache: DiT caching enabled flag
-            - vae_cache: VAE caching enabled flag
-            - dit_id: DiT node ID
-            - vae_id: VAE node ID
-            - dit_model: DiT model name
-            - vae_model: VAE model name
-            - cached_dit: Cached DiT model instance (if found and valid)
-            - cached_vae: Cached VAE model instance (if found and valid)
-            - dit_newly_cached: Flag indicating if DiT was just cached
-            - vae_newly_cached: Flag indicating if VAE was just cached
-            - reusing_runner: Flag indicating if runner template is reused
-            
-    Note:
-        Automatically removes stale cache entries when model names don't match
-        the cached model's stored name (_model_name attribute).
-    """
-    global_cache = get_global_cache()
-    context = {
-        'global_cache': global_cache,
-        'dit_cache': dit_cache,
-        'vae_cache': vae_cache,
-        'dit_id': dit_id,
-        'vae_id': vae_id,
-        'dit_model': dit_model,
-        'vae_model': vae_model,
-        'cached_dit': None,
-        'cached_vae': None,
-        'dit_newly_cached': False,
-        'vae_newly_cached': False,
-        'reusing_runner': False
-    }
-    
-    # Check for cached DiT model with model name validation
-    # Model name validation prevents stale cache when user switches models in UI
-    if dit_cache and dit_model and dit_id is not None:
-        cached_model = global_cache.get_dit({'node_id': dit_id, 'cache_model': True}, debug)
-        if cached_model:
-            # Verify cached model matches requested model by checking _model_name attribute
-            cached_model_name = getattr(cached_model, '_model_name', None)
-            if cached_model_name == dit_model:
-                # Cache hit with valid model - reuse it
-                context['cached_dit'] = cached_model
-            else:
-                # Model changed - remove stale cache and log the change
-                if cached_model_name:
-                    debug.log(f"DiT model changed in cache ({cached_model_name} → {dit_model}), "
-                             f"removing stale cached model", category="cache", force=True)
-                global_cache.remove_dit({'node_id': dit_id}, debug)
-    else:
-        # Caching disabled or no ID - clean up any existing cache for this node
-        if dit_id is not None:
-            global_cache.remove_dit({'node_id': dit_id}, debug)
-
-    # Check for cached VAE model with model name validation
-    if vae_cache and vae_model and vae_id is not None:
-        cached_model = global_cache.get_vae({'node_id': vae_id, 'cache_model': True}, debug)
-        if cached_model:
-            # Verify cached model matches requested model by checking _model_name attribute
-            cached_model_name = getattr(cached_model, '_model_name', None)
-            if cached_model_name == vae_model:
-                context['cached_vae'] = cached_model
-            else:
-                # Model changed - remove stale cache and log the change
-                if cached_model_name:
-                    debug.log(f"VAE model changed in cache ({cached_model_name} → {vae_model}), "
-                             f"removing stale cached model", category="cache", force=True)
-                global_cache.remove_vae({'node_id': vae_id}, debug)
-    else:
-        if vae_id is not None:
-            global_cache.remove_vae({'node_id': vae_id}, debug)
-    
-    return context
-
-
-def _acquire_runner(
-    cache_context: Dict[str, Any],
-    dit_model: str,
-    vae_model: str,
-    base_cache_dir: str,
-    debug: Optional['Debug'] = None
-) -> VideoDiffusionInfer:
-    """
-    Get or create VideoDiffusionInfer runner instance using unified caching approach.
-    
-    Checks global cache for existing runner template matching the DiT/VAE node ID pair.
-    If found and model names match, reuses the template. Otherwise creates new runner.
-    
-    Args:
-        cache_context: Cache context dict from _initialize_cache_context containing:
-            - global_cache: GlobalModelCache instance
-            - dit_id: DiT node ID for cache lookup
-            - vae_id: VAE node ID for cache lookup
-            - reusing_runner: Flag to be updated if template is reused
-        dit_model: DiT model filename for validation (e.g., "seedvr2_ema_3b_fp16.safetensors")
-        vae_model: VAE model filename for validation (e.g., "ema_vae_fp16.safetensors")
-        base_cache_dir: Base directory for model files
-        debug: Debug instance for logging
-        
-    Returns:
-        VideoDiffusionInfer: Runner instance (cached template or newly created)
-    """
-    # Try to get runner template from global cache
-    template = cache_context['global_cache'].get_runner(
-        cache_context['dit_id'], cache_context['vae_id'], debug
-    )
-    
-    if template:
-        # We have a template - check if we can use it
-        current_dit = getattr(template, '_dit_model_name', None)
-        current_vae = getattr(template, '_vae_model_name', None)
-        models_match = (current_dit == dit_model and current_vae == vae_model)
-        
-        if models_match:
-            # Perfect match - reuse template directly
-            runner_key = f"{cache_context['dit_id']}+{cache_context['vae_id']}"
-            debug.log(f"Reusing cached runner template: nodes {runner_key}", category="reuse", force=True)
-            cache_context['reusing_runner'] = True
-            return template
-        else:
-            # Template exists but models changed and no cached models - create new
-            return _create_new_runner(dit_model, vae_model, base_cache_dir, debug)
-    else:
-        # No template - create new runner
-        return _create_new_runner(dit_model, vae_model, base_cache_dir, debug)
-
-
 def _create_new_runner(
     dit_model: str,
     vae_model: str,
@@ -694,7 +538,7 @@ def _create_new_runner(
     
     Loads appropriate configuration file based on model size (3B or 7B), creates
     runner instance, and initializes with default settings. Called when no cached
-    runner template is available or when model selection changes.
+    session runner is available or when checkpoint identity changes.
     
     Args:
         dit_model: DiT model filename (determines config selection)
@@ -737,8 +581,7 @@ def configure_runner(
     ctx: Dict[str, Any],
     dit_cache: bool = False,
     vae_cache: bool = False,
-    dit_id: Optional[int] = None,
-    vae_id: Optional[int] = None,
+    session: Optional[InferenceSession] = None,
     block_swap_config: Optional[Dict[str, Any]] = None,
     encode_tiled: bool = False,
     encode_tile_size: Optional[Tuple[int, int]] = None,
@@ -764,8 +607,7 @@ def configure_runner(
         ctx: Generation context from setup_generation_context
         dit_cache: Whether to cache DiT model between runs
         vae_cache: Whether to cache VAE model between runs
-        dit_id: Node instance ID for DiT model caching (required if dit_cache=True)
-        vae_id: Node instance ID for VAE model caching (required if vae_cache=True)
+        session: InferenceSession owning the runner and retained models
         block_swap_config: Optional BlockSwap configuration for DiT memory optimization
         encode_tiled: Enable tiled encoding to reduce VRAM during VAE encoding
         encode_tile_size: Tile size for encoding (height, width)
@@ -803,18 +645,16 @@ def configure_runner(
         debug=debug
     )
     
-    # Phase 1: Initialize cache and get cached models
-    cache_context = _initialize_cache_context(
-        dit_cache, vae_cache, dit_id, vae_id, 
-        dit_model, vae_model, debug
-    )
-    
-    # Phase 2: Get or create runner
-    runner = _acquire_runner(
-        cache_context, dit_model, vae_model, 
-        base_cache_dir, debug
-    )
-    
+    key = (checkpoint_identity(os.path.join(base_cache_dir, dit_model)),
+           checkpoint_identity(os.path.join(base_cache_dir, vae_model)),
+           str(ctx['dit_device']), str(ctx['vae_device']), str(ctx['compute_dtype']))
+    factory = lambda: _create_new_runner(dit_model, vae_model, base_cache_dir, debug)
+    runner = session.acquire(key, factory) if session is not None else factory()
+    cache_context = {
+        'cached_dit': getattr(runner, 'dit', None) if dit_cache else None,
+        'cached_vae': getattr(runner, 'vae', None) if vae_cache else None,
+    }
+
     # Phase 3: Configure runner settings
     _configure_runner_settings(
         runner, ctx,
@@ -933,9 +773,8 @@ def _setup_models(
     
     Args:
         runner: VideoDiffusionInfer instance to setup
-        cache_context: Cache context from _initialize_cache_context with keys:
+        cache_context: Invocation-local cache references with keys:
             - cached_dit, cached_vae: Cached model instances (or None)
-            - dit_id, vae_id: Node IDs for caching
             - Other cache state flags
         dit_model: DiT model filename for loading/validation
         vae_model: VAE model filename for loading/validation
@@ -1007,7 +846,6 @@ def _setup_dit_model(
         runner: VideoDiffusionInfer instance to setup
         cache_context: Cache context dict with keys:
             - cached_dit: Cached DiT model instance (or None)
-            - dit_id: Node ID for cache operations
         dit_model: DiT model filename (e.g., "seedvr2_ema_3b_fp16.safetensors")
         base_cache_dir: Base directory containing model files
         block_swap_config: BlockSwap configuration to store (not applied here)
@@ -1027,7 +865,7 @@ def _setup_dit_model(
     
     if cache_context['cached_dit'] is not None:
         # Reuse cached DiT model
-        debug.log(f"Reusing cached DiT ({cache_context['dit_id']}): {dit_model}", 
+        debug.log(f"Reusing cached DiT (session): {dit_model}",
                 category="reuse", force=True)
         runner.dit = cache_context['cached_dit']
         runner._dit_checkpoint = find_model_file(dit_model, base_cache_dir)
@@ -1081,7 +919,6 @@ def _setup_vae_model(
         runner: VideoDiffusionInfer instance to setup
         cache_context: Cache context dict with keys:
             - cached_vae: Cached VAE model instance (or None)
-            - vae_id: Node ID for cache operations
         vae_model: VAE model filename (e.g., "ema_vae_fp16.safetensors")
         base_cache_dir: Base directory containing model files
         debug: Debug instance for logging
@@ -1100,7 +937,7 @@ def _setup_vae_model(
     
     if cache_context['cached_vae'] is not None:
         # Reuse cached VAE model
-        debug.log(f"Reusing cached VAE ({cache_context['vae_id']}): {vae_model}", 
+        debug.log(f"Reusing cached VAE (session): {vae_model}",
                 category="reuse", force=True)
         runner.vae = cache_context['cached_vae']
         runner._vae_checkpoint = find_model_file(vae_model, base_cache_dir)

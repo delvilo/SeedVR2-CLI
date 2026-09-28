@@ -24,6 +24,7 @@ Key Features:
 """
 
 import os
+import sys
 import torch
 from typing import Dict, List, Optional, Tuple, Any, Callable
 
@@ -89,6 +90,8 @@ def _prepare_video_batch(
     """
     # Extract frames (view/slice, not copy)
     video = images[start_idx:end_idx]
+    if video.dtype == torch.uint8:
+        video = video.to(torch.float16).div_(255)
     
     # Apply uniform padding if needed
     if uniform_padding > 0:
@@ -244,7 +247,7 @@ def encode_all_batches(
     
     # Setup video transformation pipeline and compute dimensions if not already done
     if 'true_target_dims' not in ctx:
-        sample_frame = images[0].permute(2, 0, 1).unsqueeze(0)
+        sample_frame = images[0].permute(2, 0, 1).unsqueeze(0).to(torch.float32)
         setup_video_transform(ctx, resolution, max_resolution, debug, sample_frame)
         del sample_frame
     else:
@@ -301,23 +304,6 @@ def encode_all_batches(
         # Initialize precision after VAE is materialized with actual weights
         ensure_precision_initialized(ctx, runner, debug)
 
-        # Cache VAE now that it's fully configured and ready for inference
-        if ctx['cache_context']['vae_cache'] and not ctx['cache_context']['cached_vae']:
-            runner.vae._model_name = ctx['cache_context']['vae_model']
-            ctx['cache_context']['global_cache'].set_vae(
-                {'node_id': ctx['cache_context']['vae_id'], 'cache_model': True}, 
-                runner.vae, ctx['cache_context']['vae_model'], debug
-            )
-            ctx['cache_context']['vae_newly_cached'] = True
-            
-            # If both models now cached, cache runner template
-            dit_is_cached = ctx['cache_context']['cached_dit'] or ctx['cache_context']['dit_newly_cached']
-            if dit_is_cached:
-                ctx['cache_context']['global_cache'].set_runner(
-                    ctx['cache_context']['dit_id'], ctx['cache_context']['vae_id'], 
-                    runner, debug
-                )
-        
         # Set deterministic seed for VAE encoding (separate from diffusion noise)
         # Uses seed + 1,000,000 to avoid collision with upscaling batch seeds
         # This ensures VAE sampling is deterministic while maintaining quality
@@ -523,7 +509,9 @@ def encode_all_batches(
         raise
     finally:
         # Offload VAE to configured offload device if specified
-        if ctx['vae_offload_device'] is not None:
+        if sys.exception() is not None:
+            cleanup_vae(runner, debug, cache_model=False)
+        elif ctx['vae_offload_device'] is not None:
             manage_model_device(model=runner.vae, target_device=ctx['vae_offload_device'], 
                                 model_name="VAE", debug=debug, reason="VAE offload", runner=runner)
     
@@ -622,23 +610,6 @@ def upscale_all_batches(
         # Initialize precision after DiT is materialized with actual weights
         ensure_precision_initialized(ctx, runner, debug)
 
-        # Cache DiT now that it's fully configured and ready for inference
-        if ctx['cache_context']['dit_cache'] and not ctx['cache_context']['cached_dit']:
-            runner.dit._model_name = ctx['cache_context']['dit_model']
-            ctx['cache_context']['global_cache'].set_dit(
-                {'node_id': ctx['cache_context']['dit_id'], 'cache_model': True}, 
-                runner.dit, ctx['cache_context']['dit_model'], debug
-            )
-            ctx['cache_context']['dit_newly_cached'] = True
-            
-            # If both models now cached, cache runner template
-            vae_is_cached = ctx['cache_context']['cached_vae'] or ctx['cache_context']['vae_newly_cached']
-            if vae_is_cached:
-                ctx['cache_context']['global_cache'].set_runner(
-                    ctx['cache_context']['dit_id'], ctx['cache_context']['vae_id'], 
-                    runner, debug
-                )
-        
         # Move DiT to GPU for upscaling (no-op if already there)
         manage_model_device(model=runner.dit, target_device=ctx['dit_device'], 
                             model_name="DiT", debug=debug, runner=runner)
@@ -785,7 +756,7 @@ def upscale_all_batches(
                             category="blockswap", indent_level=1)
 
         # Cleanup DiT as it's no longer needed after upscaling
-        cleanup_dit(runner=runner, debug=debug, cache_model=cache_model)
+        cleanup_dit(runner=runner, debug=debug, cache_model=cache_model and sys.exception() is None)
         
         # Cleanup text embeddings as they're no longer needed after upscaling
         cleanup_text_embeddings(ctx, debug)
@@ -1049,7 +1020,8 @@ def postprocess_all_batches(
     color_correction: str = "wavelet",
     prepend_frames: int = 0,
     temporal_overlap: int = 0,
-    batch_size: int = 5
+    batch_size: int = 5,
+    cleanup: bool = True
 ) -> Dict[str, Any]:
     """
     Phase 4: Post-processing and Final Assembly.
@@ -1158,7 +1130,7 @@ def postprocess_all_batches(
                     rgb_samples=[rgb_tchw],
                     alpha_original=ctx['all_alpha_channels'][batch_idx],
                     rgb_original=ctx['all_input_rgb'][batch_idx],
-                    device=ctx['vae_device'],
+                    device=ctx.get('postprocess_device', ctx['vae_device']),
                     compute_dtype=ctx['compute_dtype'],
                     debug=debug
                 )
@@ -1222,7 +1194,7 @@ def postprocess_all_batches(
             # Move to VAE device for processing
             sample = manage_tensor(
                 tensor=sample,
-                target_device=ctx['vae_device'],
+                target_device=ctx.get('postprocess_device', ctx['vae_device']) if color_correction != "none" else sample.device,
                 tensor_name=f"sample_{info_idx+1}",
                 dtype=ctx['compute_dtype'],
                 debug=debug,
@@ -1242,8 +1214,9 @@ def postprocess_all_batches(
                     # For batches after the first with temporal overlap, the overlap frames
                     # were blended in Phase 3 and are not part of this slice. Skip them.
                     actual_overlap = ctx.get('actual_temporal_overlap', 0)
-                    if info_idx > 0 and actual_overlap > 0:
-                        input_video = input_video[actual_overlap:]
+                    skip_head = ctx.get("postprocess_skip_head", actual_overlap if batch_idx > 0 else 0)
+                    if skip_head:
+                        input_video = input_video[skip_head:]
                     
                     # Trim input_video to match sample length (handles padding differences)
                     if input_video.shape[0] > sample.shape[0]:
@@ -1419,42 +1392,43 @@ def postprocess_all_batches(
         debug.log(f"Error in Phase 4 (Post-processing): {e}", level="ERROR", category="generation", force=True)
         raise
     finally:
-        # 1. Clean up decode_batch_info and padding stats
-        if 'decode_batch_info' in ctx:
-            del ctx['decode_batch_info']
-        if 'total_padding_removed' in ctx:
-            del ctx['total_padding_removed']
+        if cleanup:
+            # 1. Clean up decode_batch_info and padding stats
+            if 'decode_batch_info' in ctx:
+                del ctx['decode_batch_info']
+            if 'total_padding_removed' in ctx:
+                del ctx['total_padding_removed']
         
-        # 2. Clean up video transform caches
-        if 'video_transform' in ctx and ctx['video_transform'] is not None:
-            if hasattr(ctx['video_transform'], 'transforms'):
-                for transform in ctx['video_transform'].transforms:
-                    # Clear cache attributes
-                    for cache_attr in ['cache', '_cache']:
-                        if hasattr(transform, cache_attr):
-                            setattr(transform, cache_attr, None)
-                    # Clear remaining attributes
-                    if hasattr(transform, '__dict__'):
-                        transform.__dict__.clear()
-            del ctx['video_transform']
+            # 2. Clean up video transform caches
+            if 'video_transform' in ctx and ctx['video_transform'] is not None:
+                if hasattr(ctx['video_transform'], 'transforms'):
+                    for transform in ctx['video_transform'].transforms:
+                        # Clear cache attributes
+                        for cache_attr in ['cache', '_cache']:
+                            if hasattr(transform, cache_attr):
+                                setattr(transform, cache_attr, None)
+                        # Clear remaining attributes
+                        if hasattr(transform, '__dict__'):
+                            transform.__dict__.clear()
+                del ctx['video_transform']
         
-        # 3. Clean up storage lists (all_latents, all_alpha_channels, etc.)
-        tensor_storage_keys = ['all_latents', 'all_alpha_channels', 'all_input_rgb']
-        for key in tensor_storage_keys:
-            if key in ctx and ctx[key]:
-                release_tensor_collection(ctx[key])
-                del ctx[key]
+            # 3. Clean up storage lists (all_latents, all_alpha_channels, etc.)
+            tensor_storage_keys = ['all_latents', 'all_alpha_channels', 'all_input_rgb']
+            for key in tensor_storage_keys:
+                if key in ctx and ctx[key]:
+                    release_tensor_collection(ctx[key])
+                    del ctx[key]
         
-        # 4. Clean up non-tensor storage
-        if 'all_ori_lengths' in ctx:
-            del ctx['all_ori_lengths']
-        if 'true_target_dims' in ctx:
-            del ctx['true_target_dims']
-        if 'batch_metadata' in ctx:
-            del ctx['batch_metadata']
-        if 'input_images' in ctx:
-            release_tensor_memory(ctx['input_images'])
-            del ctx['input_images']
+            # 4. Clean up non-tensor storage
+            if 'all_ori_lengths' in ctx:
+                del ctx['all_ori_lengths']
+            if 'true_target_dims' in ctx:
+                del ctx['true_target_dims']
+            if 'batch_metadata' in ctx:
+                del ctx['batch_metadata']
+            if 'input_images' in ctx:
+                release_tensor_memory(ctx['input_images'])
+                del ctx['input_images']
 
     debug.end_timer("phase4_postprocessing", "Phase 4: Post-processing complete", show_breakdown=True)
     debug.log_memory_state("After phase 4 (Post-processing)", show_tensors=False)

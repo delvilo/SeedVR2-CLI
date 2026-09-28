@@ -255,7 +255,6 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
     
     if is_cuda_available():
         torch.cuda.empty_cache()
-        torch.cuda.ipc_collect()
     
     if debug:
         debug.end_timer(gpu_timer, "GPU cache clearing")
@@ -293,46 +292,12 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
 
 
 def retry_on_oom(func, *args, debug=None, operation_name="operation", **kwargs):
+    """Run once; the CLI retries the file transaction with a smaller workload.
+
+    Retrying here would retain the failed call's traceback/tensors and repeat the
+    same allocation. The outer retry unwinds those references before recovery.
     """
-    Execute function with single OOM retry after memory cleanup.
-    
-    Args:
-        func: Callable to execute
-        *args: Positional arguments for func
-        debug: Debug instance for logging (optional)
-        operation_name: Name for logging
-        **kwargs: Keyword arguments for func
-    
-    Returns:
-        Result of func(*args, **kwargs)
-    """
-    try:
-        return func(*args, **kwargs)
-    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-        # Only handle OOM errors
-        if not any(x in str(e).lower() for x in ["out of memory", "allocation on device"]):
-            raise
-        
-        if debug:
-            debug.log(f"OOM during {operation_name}: {e}", level="WARNING", category="memory", force=True)
-            debug.log(f"Clearing memory and retrying", category="info", force=True)
-        
-        # Clear memory
-        clear_memory(debug=debug, deep=True, force=True, timer_name=operation_name)
-        # Let memory settle
-        time.sleep(0.5)
-        debug.log_memory_state("After memory clearing", show_tensors=False, detailed_tensors=False)
-        
-        # Single retry
-        try:
-            result = func(*args, **kwargs)
-            if debug:
-                debug.log(f"Retry successful for {operation_name}", category="success", force=True)
-            return result
-        except Exception as retry_e:
-            if debug:
-                debug.log(f"Retry failed for {operation_name}: {retry_e}", level="ERROR", category="memory", force=True)
-            raise
+    return func(*args, **kwargs)
 
 
 def reset_vram_peak(device: Optional[torch.device] = None, debug: Optional['Debug'] = None) -> None:
@@ -389,11 +354,11 @@ def clear_rope_lru_caches(model: Optional[torch.nn.Module], debug: Optional['Deb
 
 
 def release_tensor_memory(tensor: Optional[torch.Tensor]) -> None:
-    """Release tensor memory from CPU or CUDA."""
-    if tensor is not None and torch.is_tensor(tensor):
-        # Release storage for CPU and CUDA tensors.
-        if tensor.numel() > 0:
-            tensor.data.set_()
+    """Clear gradients only. Owners release storage by dropping references.
+
+    Never mutate storage through .data: views and other owners may still need it.
+    """
+    if tensor is not None and torch.is_tensor(tensor) and tensor.is_leaf:
         tensor.grad = None
 
 
@@ -417,17 +382,18 @@ def release_tensor_collection(collection: Any, recursive: bool = True) -> None:
     if torch.is_tensor(collection):
         release_tensor_memory(collection)
     elif isinstance(collection, dict):
-        for value in collection.values():
-            if recursive:
+        if recursive:
+            for value in collection.values():
                 release_tensor_collection(value, recursive=True)
-            elif torch.is_tensor(value):
-                release_tensor_memory(value)
-    elif isinstance(collection, (list, tuple)):
-        for item in collection:
-            if recursive:
-                release_tensor_collection(item, recursive=True)
-            elif torch.is_tensor(item):
-                release_tensor_memory(item)
+        collection.clear()
+    elif isinstance(collection, list):
+        if recursive:
+            for value in collection:
+                release_tensor_collection(value, recursive=True)
+        collection.clear()
+    elif isinstance(collection, tuple) and recursive:
+        for value in collection:
+            release_tensor_collection(value, recursive=True)
 
 
 def release_text_embeddings(*embeddings: torch.Tensor, debug: Optional['Debug'] = None, names: Optional[List[str]] = None) -> None:
@@ -466,7 +432,7 @@ def cleanup_text_embeddings(ctx: Dict[str, Any], debug: Optional['Debug'] = None
             names.append(key)
     
     if embeddings:
-        release_text_embeddings(embeddings, names, debug)
+        release_text_embeddings(*embeddings, debug=debug)
         
         if debug:
             debug.log(f"Cleaned up text embeddings: {', '.join(names)}", category="cleanup")
@@ -474,44 +440,15 @@ def cleanup_text_embeddings(ctx: Dict[str, Any], debug: Optional['Debug'] = None
     ctx['text_embeds'] = None
 
     
-def release_model_memory(model: Optional[torch.nn.Module], debug: Optional['Debug'] = None) -> None:
-    """
-    Release GPU memory from model in-place without CPU transfer.
-    
-    Args:
-        model: PyTorch model to release memory from
-        debug: Optional debug instance for logging
-    """
+def release_model_memory(model: Optional[torch.nn.Module], debug=None) -> None:
+    """Clear model-owned temporary state; the session drops the model reference."""
     if model is None:
         return
-    
-    try:
-        # Clear gradients first
-        model.zero_grad(set_to_none=True)
-        
-        # Release GPU memory directly without CPU transfer
-        released_params = 0
-        released_buffers = 0
-        
-        for param in model.parameters():
-            if param.is_cuda:
-                if param.numel() > 0:
-                    param.data.set_()
-                    released_params += 1
-                param.grad = None
-                
-        for buffer in model.buffers():
-            if buffer.is_cuda:
-                if buffer.numel() > 0:
-                    buffer.data.set_()
-                    released_buffers += 1
-        
-        if debug and (released_params > 0 or released_buffers > 0):
-            debug.log(f"Released memory from {released_params} params and {released_buffers} buffers", category="success")
-                
-    except (AttributeError, RuntimeError) as e:
-        if debug:
-            debug.log(f"Failed to release model memory: {e}", level="WARNING", category="memory", force=True)
+    model.zero_grad(set_to_none=True)
+    clear_rope_lru_caches(model, debug)
+    for module in model.modules():
+        if hasattr(module, 'memory'):
+            module.memory = None
 
 
 def manage_tensor(
@@ -900,7 +837,7 @@ def clear_runtime_caches(runner: Any, debug: Optional['Debug'] = None) -> int:
         if debug:
             debug.end_timer("runner_cache_clear", f"Clearing main runner cache entries")
 
-        if cache_entries > 0:
+        if cache_entries > 0 and debug:
             debug.log(f"Cleared {cache_entries} runtime cache entries", category="success")
     
     # 2. Clear RoPE caches
@@ -917,7 +854,7 @@ def clear_runtime_caches(runner: Any, debug: Optional['Debug'] = None) -> int:
         if debug:
             debug.end_timer("rope_cache_clear", "Clearing RoPE LRU caches")
 
-        if rope_cleared > 0:
+        if rope_cleared > 0 and debug:
             debug.log(f"Cleared {rope_cleared} RoPE LRU caches", category="success")
     
     # 3. Clear temporary attributes
@@ -951,7 +888,7 @@ def cleanup_dit(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         debug: Debug instance for logging
         cache_model: If True, move DiT to offload_device; if False, delete completely
     """
-    if not runner or not hasattr(runner, 'dit'):
+    if runner is None or getattr(runner, 'dit', None) is None:
         return
     
     if debug:
@@ -982,7 +919,7 @@ def cleanup_dit(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         param_device = next(runner.dit.parameters()).device
         
         # Move model off GPU if needed
-        if param_device.type not in ['meta', 'cpu']:
+        if cache_model and param_device.type not in ['meta', 'cpu']:
             offload_target = getattr(runner, '_dit_offload_device', None)
             if offload_target is None or offload_target == 'none':
                 offload_target = torch.device('cpu')
@@ -1035,7 +972,7 @@ def cleanup_vae(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         debug: Debug instance for logging
         cache_model: If True, move VAE to offload_device; if False, delete completely
     """
-    if not runner or not hasattr(runner, 'vae'):
+    if runner is None or getattr(runner, 'vae', None) is None:
         return
     
     if debug:
@@ -1055,7 +992,7 @@ def cleanup_vae(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         param_device = next(runner.vae.parameters()).device
         
         # Move model off GPU if needed
-        if param_device.type not in ['meta', 'cpu']:
+        if cache_model and param_device.type not in ['meta', 'cpu']:
             offload_target = getattr(runner, '_vae_offload_device', None)
             if offload_target is None or offload_target == 'none':
                 offload_target = torch.device('cpu')
