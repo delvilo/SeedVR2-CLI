@@ -63,7 +63,7 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --debug | Show environment, timing, VRAM, and processing details. |
 
 Use --help for the complete option list. Larger models, batches, and output resolutions require more VRAM. Start with a short sample at a modest resolution before processing a long video.
-
+https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler#command-line-arguments
 ## Development checks
 
 Run `python -m compileall -q inference_cli.py src tests` and `python -m unittest discover -s tests -v` before proposing changes. The Colab notebook's short video sample checks the full inference path on the target GPU runtime.
