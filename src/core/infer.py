@@ -153,27 +153,15 @@ class VideoDiffusionInfer():
                 except StopIteration:
                     vae_dtype = dtype  # Fallback
 
-                # Use autocast if VAE dtype differs from input dtype
-                # Skip autocast on MPS (only supports bf16, unified memory = no benefit)
-                # Instead, explicitly convert input to model dtype
+                # Use CUDA autocast if VAE dtype differs from input dtype
                 if vae_dtype != sample.dtype:
-                    if device.type == 'mps':
-                        # MPS: explicit dtype conversion instead of autocast
-                        sample = sample.to(vae_dtype)
+                    with torch.autocast(device.type, sample.dtype, enabled=True):
                         if use_sample:
                             latent = self.vae.encode(sample, tiled=self.encode_tiled, tile_size=self.encode_tile_size, 
                                                     tile_overlap=self.encode_tile_overlap).latent
                         else:
                             latent = self.vae.encode(sample, tiled=self.encode_tiled, tile_size=self.encode_tile_size,
                                                 tile_overlap=self.encode_tile_overlap).posterior.mode().squeeze(2)
-                    else:
-                        with torch.autocast(device.type, sample.dtype, enabled=True):
-                            if use_sample:
-                                latent = self.vae.encode(sample, tiled=self.encode_tiled, tile_size=self.encode_tile_size, 
-                                                        tile_overlap=self.encode_tile_overlap).latent
-                            else:
-                                latent = self.vae.encode(sample, tiled=self.encode_tiled, tile_size=self.encode_tile_size,
-                                                    tile_overlap=self.encode_tile_overlap).posterior.mode().squeeze(2)
                 else:
                     if use_sample:
                         latent = self.vae.encode(sample, tiled=self.encode_tiled, tile_size=self.encode_tile_size, 
@@ -240,24 +228,14 @@ class VideoDiffusionInfer():
                 except StopIteration:
                     vae_dtype = dtype  # Fallback
 
-                # Use autocast if VAE dtype differs from latent dtype
-                # Skip autocast on MPS (only supports bf16, unified memory = no benefit)
+                # Use CUDA autocast if VAE dtype differs from latent dtype
                 if vae_dtype != latent.dtype:
-                    if device.type == 'mps':
-                        # MPS: explicit dtype conversion instead of autocast
-                        latent = latent.to(vae_dtype)
+                    with torch.autocast(device.type, latent.dtype, enabled=True):
                         sample = self.vae.decode(
                             latent,
                             tiled=self.decode_tiled, tile_size=self.decode_tile_size,
                             tile_overlap=self.decode_tile_overlap
                         ).sample
-                    else:
-                        with torch.autocast(device.type, latent.dtype, enabled=True):
-                            sample = self.vae.decode(
-                                latent,
-                                tiled=self.decode_tiled, tile_size=self.decode_tile_size,
-                                tile_overlap=self.decode_tile_overlap
-                            ).sample
                 else:
                     sample = self.vae.decode(
                         latent,

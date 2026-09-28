@@ -7,22 +7,14 @@ Extracted from: seedvr2.py (lines 373-405, 607-626, 1016-1044)
 
 import torch
 import gc
-import sys
 import time
 import psutil
-import platform
 from typing import Tuple, Dict, Any, Optional, List, Union
 
 
 def _device_str(device: Union[torch.device, str]) -> str:
-    """Normalized uppercase device string for comparison and logging. MPS variants → 'MPS'."""
-    s = str(device).upper()
-    return 'MPS' if s.startswith('MPS') else s
-
-
-def is_mps_available() -> bool:
-    """Check if MPS (Apple Metal) backend is available."""
-    return hasattr(torch.backends, 'mps') and torch.backends.mps.is_available()
+    """Normalized uppercase device string for comparison and logging."""
+    return str(device).upper()
 
 
 def is_cuda_available() -> bool:
@@ -35,13 +27,10 @@ def get_gpu_backend() -> str:
     
     Returns:
         'cuda': NVIDIA CUDA
-        'mps': Apple Metal Performance Shaders
         'cpu': No GPU backend available
     """
     if is_cuda_available():
         return 'cuda'
-    if is_mps_available():
-        return 'mps'
     return 'cpu'
 
 
@@ -52,27 +41,14 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     Args:
         include_none: If True, prepend "none" to the device list (for offload options)
         include_cpu: If True, include "cpu" in the device list (for offload options only)
-                     Note: On MPS-only systems, "cpu" is automatically excluded since
-                     unified memory architecture makes CPU offloading meaningless
         
     Returns:
         List of device strings (e.g., ["cuda:0", "cuda:1"] or ["none", "cpu", "cuda:0", "cuda:1"])
     """
     devs = []
-    has_cuda = False
-    has_mps = False
-    
     try:
         if is_cuda_available():
             devs += [f"cuda:{i}" for i in range(torch.cuda.device_count())]
-            has_cuda = True
-    except Exception:
-        pass
-    
-    try:
-        if is_mps_available():
-            devs.append("mps")  # MPS doesn't use device indices
-            has_mps = True
     except Exception:
         pass
     
@@ -81,12 +57,7 @@ def get_device_list(include_none: bool = False, include_cpu: bool = False) -> Li
     if include_none:
         result.append("none")
     
-    # Only include "cpu" option if:
-    # 1. It was requested (include_cpu=True), AND
-    # 2. Either CUDA is available OR MPS is not the only option
-    # Rationale: On MPS-only systems with unified memory architecture,
-    # CPU offloading is semantically meaningless as CPU and GPU share the same memory pool
-    if include_cpu and (has_cuda or not has_mps):
+    if include_cpu:
         result.append("cpu")
     
     result.extend(devs)
@@ -112,14 +83,8 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
             elif not isinstance(device, torch.device):
                 device = torch.device(device)
             free_memory, total_memory = torch.cuda.mem_get_info(device)
-        elif is_mps_available():
-            # MPS doesn't support per-device queries or mem_get_info
-            # Use system memory as proxy
-            mem = psutil.virtual_memory()
-            free_memory = mem.total - mem.used
-            total_memory = mem.total
         else:
-            return {"error": "No GPU backend available (CUDA/MPS)"}
+            return {"error": "No CUDA GPU available"}
         
         return {
             "free_gb": free_memory / (1024**3),
@@ -132,7 +97,7 @@ def get_basic_vram_info(device: Optional[torch.device] = None) -> Dict[str, Any]
 # Initial VRAM check at module load
 vram_info = get_basic_vram_info(device=None)
 if "error" not in vram_info:
-    backend = "MPS" if is_mps_available() else "CUDA"
+    backend = "CUDA"
     print(f"📊 Initial {backend} memory: {vram_info['free_gb']:.2f}GB free / {vram_info['total_gb']:.2f}GB total")
 else:
     print(f"⚠️ Memory check failed: {vram_info['error']} - No available backend!")
@@ -162,12 +127,6 @@ def get_vram_usage(device: Optional[torch.device] = None, debug: Optional['Debug
             peak_allocated = torch.cuda.max_memory_allocated(device) / (1024**3)
             peak_reserved = torch.cuda.max_memory_reserved(device) / (1024**3)
             return allocated, reserved, peak_allocated, peak_reserved
-        elif is_mps_available():
-            # MPS doesn't support per-device queries - uses global memory tracking
-            allocated = torch.mps.current_allocated_memory() / (1024**3)
-            reserved = torch.mps.driver_allocated_memory() / (1024**3)
-            # MPS doesn't track peak separately
-            return allocated, reserved, allocated, reserved
     except Exception as e:
         if debug:
             debug.log(f"Failed to get VRAM usage: {e}", level="WARNING", category="memory", force=True)
@@ -263,16 +222,15 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
         mem_info = get_basic_vram_info(device=None)
         
         if "error" not in mem_info and mem_info["total_gb"] > 0:
-            # Check VRAM/MPS memory pressure (5% free threshold)
+            # Check VRAM pressure (5% free threshold)
             free_ratio = mem_info["free_gb"] / mem_info["total_gb"]
             if free_ratio < 0.05:
                 should_clear = True
                 if debug:
-                    backend = "Unified Memory" if is_mps_available() else "VRAM"
-                    debug.log(f"{backend} pressure: {mem_info['free_gb']:.2f}GB free of {mem_info['total_gb']:.2f}GB", category="memory")
+                    debug.log(f"VRAM pressure: {mem_info['free_gb']:.2f}GB free of {mem_info['total_gb']:.2f}GB", category="memory")
         
-        # For non-MPS systems, also check system RAM separately
-        if not should_clear and not is_mps_available():
+        # Check system RAM separately.
+        if not should_clear:
             mem = psutil.virtual_memory()
             if mem.available < mem.total * 0.05:
                 should_clear = True
@@ -298,8 +256,6 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
     if is_cuda_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
-    elif is_mps_available():
-        torch.mps.empty_cache()
     
     if debug:
         debug.end_timer(gpu_timer, "GPU cache clearing")
@@ -315,37 +271,15 @@ def clear_memory(debug: Optional['Debug'] = None, deep: bool = False, force: boo
         if debug:
             debug.end_timer(gc_timer, "Garbage collection")
 
-        # Step 3: Return memory to OS (platform-specific, ~5-30ms)
+        # Step 3: Return memory to Linux (~5-30ms)
         if debug:
             debug.start_timer(os_timer)
 
         try:
-            if sys.platform == 'linux':
-                # Linux: malloc_trim
-                import ctypes  # Import only when needed
-                if _os_memory_lib is None:
-                    _os_memory_lib = ctypes.CDLL("libc.so.6")
-                _os_memory_lib.malloc_trim(0)
-                
-            elif sys.platform == 'win32':
-                # Windows: Trim working set
-                import ctypes  # Import only when needed
-                if _os_memory_lib is None:
-                    _os_memory_lib = ctypes.windll.kernel32
-                handle = _os_memory_lib.GetCurrentProcess()
-                _os_memory_lib.SetProcessWorkingSetSize(handle, -1, -1)
-                
-            elif is_mps_available():
-                # macOS with MPS
-                import ctypes  # Import only when needed
-                import ctypes.util
-                if _os_memory_lib is None:
-                    libc_path = ctypes.util.find_library('c')
-                    if libc_path:
-                        _os_memory_lib = ctypes.CDLL(libc_path)
-                
-                if _os_memory_lib:
-                    _os_memory_lib.sync()
+            import ctypes  # Import only when needed
+            if _os_memory_lib is None:
+                _os_memory_lib = ctypes.CDLL("libc.so.6")
+            _os_memory_lib.malloc_trim(0)
         except Exception as e:
             if debug:
                 debug.log(f"Failed to perform OS memory operations: {e}", level="WARNING", category="memory", force=True)
@@ -418,7 +352,6 @@ def reset_vram_peak(device: Optional[torch.device] = None, debug: Optional['Debu
             elif not isinstance(device, torch.device):
                 device = torch.device(device)
             torch.cuda.reset_peak_memory_stats(device)
-        # Note: MPS doesn't support peak memory reset - no action needed
     except Exception as e:
         if debug and debug.enabled:
             debug.log(f"Failed to reset peak memory stats: {e}", level="WARNING", category="memory", force=True)
@@ -456,9 +389,9 @@ def clear_rope_lru_caches(model: Optional[torch.nn.Module], debug: Optional['Deb
 
 
 def release_tensor_memory(tensor: Optional[torch.Tensor]) -> None:
-    """Release tensor memory from any device (CPU/CUDA/MPS)"""
+    """Release tensor memory from CPU or CUDA."""
     if tensor is not None and torch.is_tensor(tensor):
-        # Release storage for all devices (CPU, CUDA, MPS)
+        # Release storage for CPU and CUDA tensors.
         if tensor.numel() > 0:
             tensor.data.set_()
         tensor.grad = None
@@ -543,7 +476,7 @@ def cleanup_text_embeddings(ctx: Dict[str, Any], debug: Optional['Debug'] = None
     
 def release_model_memory(model: Optional[torch.nn.Module], debug: Optional['Debug'] = None) -> None:
     """
-    Release all GPU/MPS memory from model in-place without CPU transfer.
+    Release GPU memory from model in-place without CPU transfer.
     
     Args:
         model: PyTorch model to release memory from
@@ -561,14 +494,14 @@ def release_model_memory(model: Optional[torch.nn.Module], debug: Optional['Debu
         released_buffers = 0
         
         for param in model.parameters():
-            if param.is_cuda or param.is_mps:
+            if param.is_cuda:
                 if param.numel() > 0:
                     param.data.set_()
                     released_params += 1
                 param.grad = None
                 
         for buffer in model.buffers():
-            if buffer.is_cuda or buffer.is_mps:
+            if buffer.is_cuda:
                 if buffer.numel() > 0:
                     buffer.data.set_()
                     released_buffers += 1
@@ -750,7 +683,7 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
         model: Model to move (actual unwrapped model)
         current_device: Current device of the model
         target_device: Target device (torch.device object)
-        target_type: Target device type (cpu/cuda/mps)
+        target_type: Target device type (cpu/cuda)
         model_name: Model name for logging
         debug: Debug instance
         reason: Movement reason
@@ -766,7 +699,7 @@ def _handle_blockswap_model_movement(runner: Any, model: torch.nn.Module,
         # Check if any parameter is on GPU (for accurate logging)
         actual_source_device = None
         for param in model.parameters():
-            if param.device.type in ['cuda', 'mps']:
+            if param.device.type == 'cuda':
                 actual_source_device = param.device
                 break
         
@@ -916,7 +849,7 @@ def _standard_model_movement(model: torch.nn.Module, current_device: torch.devic
         cleared_count = 0
         for module in model.modules():
             if hasattr(module, 'memory') and module.memory is not None:
-                if torch.is_tensor(module.memory) and (module.memory.is_cuda or module.memory.is_mps):
+                if torch.is_tensor(module.memory) and module.memory.is_cuda:
                     module.memory = None
                     cleared_count += 1
         if cleared_count > 0 and debug:
@@ -1050,17 +983,12 @@ def cleanup_dit(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         
         # Move model off GPU if needed
         if param_device.type not in ['meta', 'cpu']:
-            # MPS: skip CPU movement before deletion (unified memory, just causes sync)
-            if param_device.type == 'mps' and not cache_model:
-                if debug:
-                    debug.log("DiT on MPS - skipping CPU movement before deletion", category="cleanup")
-            else:
-                offload_target = getattr(runner, '_dit_offload_device', None)
-                if offload_target is None or offload_target == 'none':
-                    offload_target = torch.device('cpu')
-                reason = "model caching" if cache_model else "releasing GPU memory"
-                manage_model_device(model=runner.dit, target_device=offload_target, model_name="DiT", 
-                                   debug=debug, reason=reason, runner=runner)
+            offload_target = getattr(runner, '_dit_offload_device', None)
+            if offload_target is None or offload_target == 'none':
+                offload_target = torch.device('cpu')
+            reason = "model caching" if cache_model else "releasing GPU memory"
+            manage_model_device(model=runner.dit, target_device=offload_target, model_name="DiT",
+                               debug=debug, reason=reason, runner=runner)
         elif param_device.type == 'meta' and debug:
             debug.log("DiT on meta device - keeping structure for cache", category="cleanup")
     except StopIteration:
@@ -1128,17 +1056,12 @@ def cleanup_vae(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         
         # Move model off GPU if needed
         if param_device.type not in ['meta', 'cpu']:
-            # MPS: skip CPU movement before deletion (unified memory, just causes sync)
-            if param_device.type == 'mps' and not cache_model:
-                if debug:
-                    debug.log("VAE on MPS - skipping CPU movement before deletion", category="cleanup")
-            else:
-                offload_target = getattr(runner, '_vae_offload_device', None)
-                if offload_target is None or offload_target == 'none':
-                    offload_target = torch.device('cpu')
-                reason = "model caching" if cache_model else "releasing GPU memory"
-                manage_model_device(model=runner.vae, target_device=offload_target, model_name="VAE", 
-                                   debug=debug, reason=reason, runner=runner)
+            offload_target = getattr(runner, '_vae_offload_device', None)
+            if offload_target is None or offload_target == 'none':
+                offload_target = torch.device('cpu')
+            reason = "model caching" if cache_model else "releasing GPU memory"
+            manage_model_device(model=runner.vae, target_device=offload_target, model_name="VAE",
+                               debug=debug, reason=reason, runner=runner)
         elif param_device.type == 'meta' and debug:
             debug.log("VAE on meta device - keeping structure for cache", category="cleanup")
     except StopIteration:

@@ -5,116 +5,7 @@ Contains FP8/FP16 compatibility layers and wrappers for different model architec
 Extracted from: seedvr2.py (lines 1045-1630)
 """
 
-# Compatibility shims - Must run before any torch/diffusers import
-import sys
 import types
-import importlib.machinery
-
-
-def ensure_triton_compat():
-    """Create minimal triton.ops stubs only if missing, to allow bitsandbytes import."""
-    if 'triton.ops.matmul_perf_model' in sys.modules:
-        return
-    
-    try:
-        from triton.ops.matmul_perf_model import early_config_prune  # noqa: F401
-        return
-    except (ImportError, ModuleNotFoundError, AttributeError):
-        pass
-    
-    if 'triton.ops' not in sys.modules:
-        sys.modules['triton.ops'] = types.ModuleType('triton.ops')
-    
-    matmul_perf = types.ModuleType('triton.ops.matmul_perf_model')
-    matmul_perf.early_config_prune = lambda configs, *a, **kw: configs
-    matmul_perf.estimate_matmul_time = lambda *a, **kw: 0.0
-    
-    sys.modules['triton.ops'].matmul_perf_model = matmul_perf
-    sys.modules['triton.ops.matmul_perf_model'] = matmul_perf
-
-
-def ensure_flash_attn_safe():
-    """
-    Pre-test flash_attn package; stub if DLL is broken.
-    Prevents diffusers from crashing when flash_attn has broken DLLs.
-    """
-    if 'flash_attn' in sys.modules:
-        return  # Already loaded
-    
-    try:
-        import flash_attn
-    except (ImportError, OSError):
-        # DLL broken or not installed - create stub with proper __spec__
-        stub = types.ModuleType('flash_attn')
-        stub.__spec__ = importlib.machinery.ModuleSpec('flash_attn', None)
-        stub.__file__ = None
-        stub.__path__ = []
-        stub.__loader__ = None
-        # Provide attributes that diffusers/transformers import
-        stub.flash_attn_func = None
-        stub.flash_attn_varlen_func = None
-        sys.modules['flash_attn'] = stub
-
-
-def ensure_xformers_flash_compat():
-    """
-    Pre-test xformers._C_flashattention; stub if DLL is broken.
-    Prevents xformers.ops.fmha.flash from crashing on import.
-    """
-    if 'xformers._C_flashattention' in sys.modules:
-        return  # Already loaded
-    
-    try:
-        from xformers import _C_flashattention  # noqa: F401
-    except (ImportError, OSError):
-        # DLL broken or not installed - create stub with proper __spec__
-        class _FailingStub(types.ModuleType):
-            """Stub that lets xformers gracefully disable its flash backend."""
-            def __getattr__(self, name):
-                raise ImportError("_C_flashattention unavailable")
-        
-        stub = _FailingStub('xformers._C_flashattention')
-        stub.__spec__ = importlib.machinery.ModuleSpec('xformers._C_flashattention', None)
-        stub.__file__ = None
-        stub.__path__ = []
-        stub.__loader__ = None
-        sys.modules['xformers._C_flashattention'] = stub
-
-
-def ensure_bitsandbytes_safe():
-    """
-    Pre-test bitsandbytes; stub if broken to prevent import conflicts.
-    
-    On some systems (e.g., ROCm without proper binaries), bitsandbytes registers
-    PyTorch kernels during import then fails. If another node already triggered 
-    this partial load, re-importing causes kernel registration conflicts.
-    
-    This shim catches such failures and stubs the module so diffusers can load
-    gracefully without bitsandbytes quantization support.
-    """
-    if 'bitsandbytes' in sys.modules:
-        return  # Already loaded or stubbed
-    
-    try:
-        import bitsandbytes
-        # Success - bitsandbytes works, other nodes can use it
-    except (ImportError, OSError, RuntimeError, ValueError):
-        # Installation broken, not present, or version detection failed - create stub
-        stub = types.ModuleType('bitsandbytes')
-        stub.__spec__ = importlib.machinery.ModuleSpec('bitsandbytes', None)
-        stub.__file__ = None
-        stub.__path__ = []
-        stub.__version__ = "0.0.0"
-        sys.modules['bitsandbytes'] = stub
-
-
-# Run all shims immediately on import, before torch/diffusers
-ensure_triton_compat()
-ensure_flash_attn_safe()
-ensure_xformers_flash_compat()
-ensure_bitsandbytes_safe()
-
-
 import torch
 import os
 
@@ -708,8 +599,7 @@ def call_rope_with_stability(method, *args, **kwargs):
     if hasattr(method, 'cache_clear'):
         method.cache_clear()
     
-    # Only use CUDA autocast context on CUDA devices
-    # MPS has no CUDA autocast to disable
+    # Only use CUDA autocast context when CUDA is available.
     if torch.cuda.is_available():
         with torch.cuda.amp.autocast(enabled=False):
             return method(*args, **kwargs)
@@ -725,12 +615,10 @@ class CompatibleDiT(torch.nn.Module):
     - FP8: Keeps native FP8 parameters (memory efficient), converts inputs/outputs to compute_dtype for arithmetic
     - FP16/BFloat16/Float32: Uses native precision throughout
     - GGUF: On-the-fly dequantization to compute_dtype
-    - MPS: Forces all parameters to compute_dtype (unified memory requires dtype consistency)
     - RoPE: Converted from FP8 to compute_dtype for numerical consistency
     
     Optimizations:
     - RoPE Stabilization: Error handling for numerical stability in mixed precision
-    - MPS Compatibility: Unified dtype conversion for Apple Silicon backends
     """
     
     def __init__(self, dit_model, debug: 'Debug', compute_dtype: torch.dtype = torch.bfloat16, skip_conversion: bool = False):
@@ -752,15 +640,6 @@ class CompatibleDiT(torch.nn.Module):
             self._convert_rope_freqs(target_dtype=self.compute_dtype)
             self.debug.end_timer("_convert_rope_freqs", "RoPE freqs conversion")
         
-        # MPS requires unified dtype for all parameters/buffers (no autocast fallback)
-        # Apply to ALL model types (FP8, FP16, GGUF) when dtype differs from compute_dtype
-        if not skip_conversion and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            if self.model_dtype != self.compute_dtype:
-                self.debug.log(f"Converting NaDiT parameters/buffers to {self.compute_dtype} for MPS backend", category="setup", force=True)
-                self.debug.start_timer("_force_nadit_precision")
-                self._force_nadit_precision(target_dtype=self.compute_dtype)
-                self.debug.end_timer("_force_nadit_precision", "NaDiT parameters/buffers conversion")
-            
         # Apply RoPE stabilization for numerical stability
         self.debug.log(f"Stabilizing RoPE computations for numerical stability", category="setup")
         self.debug.start_timer("_stabilize_rope_computations")
@@ -796,58 +675,10 @@ class CompatibleDiT(torch.nn.Module):
             if 'RotaryEmbedding' in type(module).__name__:
                 if hasattr(module, 'rope') and hasattr(module.rope, 'freqs'):
                     if module.rope.freqs.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-                        if module.rope.freqs.device.type == "mps":
-                            module.rope.freqs.data = module.rope.freqs.to("cpu").to(target_dtype).to("mps")
-                        else:
-                            module.rope.freqs.data = module.rope.freqs.to(target_dtype)
+                        module.rope.freqs.data = module.rope.freqs.to(target_dtype)
                         converted += 1
         self.debug.log(f"Converted {converted} RoPE frequency buffers from FP8 to {target_dtype} for compatibility", category="success")
                         
-    def _force_nadit_precision(self, target_dtype: torch.dtype = torch.bfloat16) -> None:
-        """
-        Force ALL NaDiT parameters to target dtype to avoid promotion errors (MPS requirement).
-        
-        Args:
-            target_dtype: Target dtype for all parameters (default: bfloat16 for MPS compatibility)
-        """
-        converted_count = 0
-        original_dtype = None
-        
-        # Convert ALL parameters to target dtype
-        for name, param in self.dit_model.named_parameters():
-            if original_dtype is None:
-                original_dtype = param.dtype
-            if param.dtype != target_dtype:
-                if param.device.type == "mps":
-                    temp_cpu = param.data.to("cpu")
-                    temp_converted = temp_cpu.to(target_dtype)
-                    param.data = temp_converted.to("mps")
-                    del temp_cpu, temp_converted
-                else:
-                    param.data = param.data.to(target_dtype)
-                converted_count += 1
-                
-        # Also convert buffers (skip GGUF quantized buffers - they have tensor_type attribute)
-        for name, buffer in self.dit_model.named_buffers():
-            # Skip GGUF quantized buffers - these must stay in packed format for on-the-fly dequantization
-            if hasattr(buffer, 'tensor_type'):
-                continue
-            if buffer.dtype != target_dtype:
-                if buffer.device.type == "mps":
-                    temp_cpu = buffer.data.to("cpu")
-                    temp_converted = temp_cpu.to(target_dtype)
-                    buffer.data = temp_converted.to("mps")
-                    del temp_cpu, temp_converted
-                else:
-                    buffer.data = buffer.data.to(target_dtype)
-                converted_count += 1
-        
-        self.debug.log(f"Converted {converted_count} NaDiT parameters/buffers to {target_dtype} for MPS", category="success")
-        
-        # Update detected dtype
-        self.model_dtype = target_dtype
-        self.is_fp8_model = (target_dtype in (torch.float8_e4m3fn, torch.float8_e5m2))
-
     def _stabilize_rope_computations(self):
         """
         Add error handling to RoPE computations to prevent artifacts.
@@ -952,4 +783,3 @@ class CompatibleDiT(torch.nn.Module):
                 setattr(self.dit_model, name, value)
             else:
                 super().__setattr__(name, value)
-                

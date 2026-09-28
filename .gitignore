@@ -1,6 +1,5 @@
 .git/*
 **/__pycache__/
-tests/
 .vscode/
 .cursor/
 benchmark/
@@ -15,7 +14,6 @@ quantize_vae.py
 README_*.md
 run_*.py
 vram_diagnostic.py
-test_*.py
 VRAM_OPTIMIZATIONS_SUMMARY.md
 seedvr2.py
 src/core/isolated_generation.py
@@ -24,3 +22,9 @@ models/video_vae_v3_mine_bad/
 src/processing/
 TILE_VAE*
 .DS_Store
+.venv/
+models/
+output/
+*.download
+.validation_cache.json
+torchinductor_cache/

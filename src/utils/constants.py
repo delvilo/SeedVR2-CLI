@@ -12,8 +12,7 @@ import inspect
 from typing import Optional
 
 # Model folder names
-SEEDVR2_FOLDER_NAME = "SEEDVR2" # Physical folder name on disk
-SEEDVR2_MODEL_TYPE = "seedvr2" # Model type identifier for ComfyUI
+SEEDVR2_FOLDER_NAME = "SEEDVR2"  # Physical folder name on disk
 
 # Supported model file formats
 SUPPORTED_MODEL_EXTENSIONS = {'.safetensors', '.gguf'}
@@ -36,54 +35,16 @@ def get_script_directory() -> str:
 
 
 def get_base_cache_dir() -> str:
-    """
-    Get the default model cache directory path.
-    
-    Returns the path without creating the directory.
-    
-    Returns:
-        str: Path to default cache directory
-    """
-    try:
-        import folder_paths  # Only works if ComfyUI is available
-        cache_dir = os.path.join(folder_paths.models_dir, SEEDVR2_FOLDER_NAME)
-        folder_paths.add_model_folder_path(SEEDVR2_MODEL_TYPE, cache_dir)
-    except:
-        cache_dir = f"./models/{SEEDVR2_FOLDER_NAME}"
-    
-    return cache_dir
+    """Return the CLI model directory without creating it."""
+    configured = os.environ.get("SEEDVR2_MODEL_DIR")
+    if configured:
+        return os.path.abspath(os.path.expanduser(configured))
+    return os.path.join(get_script_directory(), "models", SEEDVR2_FOLDER_NAME)
 
 
 def get_all_model_paths() -> list:
-    """Get all registered model paths including those from extra_model_paths.yaml (case-insensitive)"""
-    try:
-        import folder_paths
-        # Ensure default path is registered first
-        get_base_cache_dir()
-        
-        # Case-insensitive lookup: search through all registered folder types
-        # This handles any case variation users might use in extra_model_paths.yaml
-        all_paths = []
-        target_lower = SEEDVR2_MODEL_TYPE.lower()
-        
-        # folder_paths.folder_names_and_paths is the underlying dict: {type: ([paths], extensions)}
-        if hasattr(folder_paths, 'folder_names_and_paths'):
-            for folder_type, (paths, _) in folder_paths.folder_names_and_paths.items():
-                if folder_type.lower() == target_lower:
-                    all_paths.extend(paths)
-        
-        # Remove duplicates while preserving order (os.path.normpath handles Windows/Linux path differences)
-        seen = set()
-        unique_paths = []
-        for path in all_paths:
-            normalized = os.path.normpath(path.lower())
-            if normalized not in seen:
-                seen.add(normalized)
-                unique_paths.append(path)
-        
-        return unique_paths if unique_paths else [get_base_cache_dir()]
-    except:
-        return [get_base_cache_dir()]
+    """Return the configured CLI model directory."""
+    return [get_base_cache_dir()]
 
 
 def get_all_model_files() -> dict:
@@ -108,28 +69,8 @@ def get_all_model_files() -> dict:
 
 
 def find_model_file(filename: str, fallback_dir: Optional[str] = None) -> str:
-    """
-    Find a model file in any registered path.
-    
-    Args:
-        filename: Name of the model file to find
-        fallback_dir: Directory to use if file not found in any registered path
-        
-    Returns:
-        str: Full path to the model file
-    """
-    # Get all model files
-    model_files = get_all_model_files()
-    
-    # Return path if found
-    if filename in model_files:
-        return model_files[filename]
-    
-    # Fallback to specified directory or base cache dir
-    if fallback_dir:
-        return os.path.join(fallback_dir, filename)
-    else:
-        return os.path.join(get_base_cache_dir(), filename)
+    """Resolve a model inside the explicitly selected directory."""
+    return os.path.join(fallback_dir or get_base_cache_dir(), filename)
 
 
 def get_validation_cache_path(cache_dir: Optional[str] = None) -> str:

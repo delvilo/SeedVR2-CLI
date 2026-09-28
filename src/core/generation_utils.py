@@ -18,7 +18,6 @@ Video Processing Utilities:
 Configuration Helpers:
 - load_text_embeddings: Load positive/negative text embeddings for DiT
 - calculate_optimal_batch_params: Compute batch processing parameters
-- check_interrupt: Check for user interruption
 
 Debugging Utilities:
 - _draw_tile_boundaries: Draw tile boundaries for debugging VAE tiling
@@ -350,25 +349,11 @@ def setup_generation_context(
     vae_device = _normalize_device(vae_device)
     dit_offload_device = _normalize_device(dit_offload_device) if dit_offload_device is not None else None
     vae_offload_device = _normalize_device(vae_offload_device) if vae_offload_device is not None else None
-    # MPS unified memory: CPU offload causes sync overhead with no memory benefit
-    is_mps = dit_device.type == 'mps' or vae_device.type == 'mps'
-    if is_mps and tensor_offload_device is not None and str(tensor_offload_device) == 'cpu':
-        tensor_offload_device = None
-    else:
-        tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
+    tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
     
     # Set LOCAL_RANK to 0 for single-GPU inference mode
     # CLI multi-GPU uses CUDA_VISIBLE_DEVICES to restrict visibility per worker
     os.environ.setdefault("LOCAL_RANK", "0")
-    
-    # Detect ComfyUI integration for interrupt support
-    try:
-        import comfy.model_management
-        interrupt_fn = comfy.model_management.throw_exception_if_processing_interrupted
-        comfyui_available = True
-    except:
-        interrupt_fn = None
-        comfyui_available = False
     
     # Create generation context
     ctx = {
@@ -378,14 +363,12 @@ def setup_generation_context(
         'vae_offload_device': vae_offload_device,
         'tensor_offload_device': tensor_offload_device,
         'compute_dtype': COMPUTE_DTYPE,
-        'interrupt_fn': interrupt_fn,
         'video_transform': None,
         'text_embeds': None,
         'all_latents': [],
         'all_upscaled_latents': [],
         'batch_samples': [],
         'final_video': None,
-        'comfyui_available': comfyui_available,
     }
     
     if debug:
@@ -655,12 +638,6 @@ def pad_video_temporal(videos: torch.Tensor, count: int = 0, temporal_dim: int =
     
     return torch.cat([reversed_frames, videos] if prepend else 
                     [videos, reversed_frames], dim=temporal_dim)
-
-
-def check_interrupt(ctx: Dict[str, Any]) -> None:
-    """Single interrupt check to avoid redundant imports"""
-    if ctx.get('interrupt_fn') is not None:
-        ctx['interrupt_fn']()
 
 
 def _draw_tile_boundaries(image: torch.Tensor, debug: 'Debug', tile_boundaries: list, phase: str) -> torch.Tensor:

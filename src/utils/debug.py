@@ -16,27 +16,9 @@ from ..optimization.memory_manager import (
     get_basic_vram_info, 
     get_ram_usage, 
     reset_vram_peak,
-    is_mps_available,
     is_cuda_available
 )
 from ..utils.constants import __version__
-
-
-def _format_peak_with_overflow(peak_gb: float, total_vram_gb: float) -> str:
-    """Format peak reserved memory, showing overflow breakdown on Windows.
-    
-    Args:
-        peak_gb: Peak reserved memory from PyTorch
-        total_vram_gb: Physical GPU VRAM capacity
-    """
-    if total_vram_gb <= 0:
-        return f"{peak_gb:.2f}GB reserved"
-    
-    overflow_gb = peak_gb - total_vram_gb
-    if overflow_gb <= 0 or platform.system() != 'Windows':
-        return f"{peak_gb:.2f}GB reserved"
-    
-    return f"{peak_gb:.2f}GB reserved ({total_vram_gb:.0f}GB GPU + {overflow_gb:.2f}GB overflow)"
 
 
 class Debug:
@@ -141,7 +123,7 @@ class Debug:
         
         print(f"{prefix} {indent}{message}", flush=True)
 
-    def print_header(self, cli: bool = False) -> None:
+    def print_header(self) -> None:
         """Print the header with banner - always displayed"""
         # Temporarily disable timestamps for clean header display
         original_timestamps = self.show_timestamps
@@ -158,12 +140,10 @@ class Debug:
         self.log("╚══════╝╚══════╝╚══════╝╚═════╝   ╚═══╝  ╚═╝  ╚═╝    ╚══════╝  ╚═╝ ╚══════╝", category="none", force=True, indent_level=1)
         # Version and credits - left/right aligned to logo width
         version_text = f"v{__version__}"
-        cli_indicator = "💻 CLI · " if cli else ""
-        left_part = f"{cli_indicator}{version_text}"
+        left_part = f"💻 CLI · {version_text}"
         right_part = "© ByteDance Seed · NumZ · AInVFX"
         logo_width = 75
-        emoji_compensation = 1 if cli else 0
-        padding = logo_width - len(left_part) - len(right_part) - emoji_compensation
+        padding = logo_width - len(left_part) - len(right_part) - 1
         self.log(f"{left_part}{' ' * max(1, padding)}{right_part}", category="none", force=True, indent_level=1)
         self.log("━" * logo_width, category="none", force=True, indent_level=1)
         self.log("", category="none", force=True)
@@ -173,25 +153,18 @@ class Debug:
         
         # Environment info - only in debug mode
         if self.enabled:
-            self._print_environment_info(cli)
+            self._print_environment_info()
 
-    def _print_environment_info(self, cli: bool = False) -> None:
+    def _print_environment_info(self) -> None:
         """Print concise environment info for bug reports - zero cost when debug disabled"""
-        import platform
         import sys
         
         # OS
-        os_name = platform.system()
-        if os_name == "Windows":
-            os_str = f"Windows ({platform.version()})"
-        elif os_name == "Darwin":
-            os_str = f"macOS {platform.mac_ver()[0]}"
-        else:
-            try:
-                distro = platform.freedesktop_os_release()
-                os_str = f"{distro.get('NAME', 'Linux')} {distro.get('VERSION_ID', '')}"
-            except (OSError, AttributeError):
-                os_str = f"Linux {platform.release()}"
+        try:
+            distro = platform.freedesktop_os_release()
+            os_str = f"{distro.get('NAME', 'Linux')} {distro.get('VERSION_ID', '')}"
+        except (OSError, AttributeError):
+            os_str = f"Linux {platform.release()}"
         
         # Python & PyTorch & CUDA
         py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -207,9 +180,6 @@ class Debug:
             except Exception:
                 gpu_str = "CUDA"
                 cudnn_ver = "N/A"
-        elif is_mps_available():
-            gpu_str = "Apple Silicon (MPS)"
-            cudnn_ver = "N/A"
         else:
             gpu_str = "CPU"
             cudnn_ver = "N/A"
@@ -239,20 +209,11 @@ class Debug:
         except ImportError:
             flash_str = sage_str = triton_str = "?"
         
-        # ComfyUI version
-        comfy_str = None
-        if not cli:
-            try:
-                from comfyui_version import __version__ as comfy_ver
-                comfy_str = comfy_ver
-            except ImportError:
-                pass
-        
         # Print
         self.log(f"OS: {os_str} | GPU: {gpu_str}", category="info")
         self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | FlashAttn: {flash_str} | SageAttn: {sage_str} | Triton: {triton_str}", category="info")
         cuda_line = f"CUDA: {cuda_ver} | cuDNN: {cudnn_ver}"
-        self.log(f"{cuda_line} | ComfyUI: {comfy_str}" if comfy_str else cuda_line, category="info")
+        self.log(cuda_line, category="info")
         self.log("", category="none")
 
     def print_footer(self) -> None:
@@ -261,7 +222,7 @@ class Debug:
         self.log("────────────────────────", category="none", force=True)
         self.log("Questions? Updates? Watch, star & sponsor if you can!", category="dialogue", force=True)
         self.log("https://www.youtube.com/@AInVFX", category="generation", force=True)
-        self.log("https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler", category="starlove", force=True)
+        self.log("https://github.com/delvilo/SeedVR2Lite_VideoUpscaler", category="starlove", force=True)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings
     def start_timer(self, name: str, force: bool = False) -> None:
@@ -424,14 +385,6 @@ class Debug:
         if show_diff and self.memory_checkpoints:
             self._log_memory_diff(current_metrics=memory_info, force=force)
 
-        # Overflow warning (Windows only - WDDM can page to system RAM)
-        overflow = memory_info.get('vram_overflow', 0.0)
-        
-        if overflow > 0 and platform.system() == 'Windows':
-            self.log(f"VRAM overflow: {overflow:.2f}GB paged to system RAM - severe slowdown expected. "
-                     "Consider optimizing (e.g., reduce resolution, batch size, enable BlockSwap, VAE tiling...).",
-                     level="WARNING", category="memory", force=True)
-
         # Log detailed analysis if requested
         if detailed_tensors and tensor_stats.get('details'):
             self._log_detailed_tensor_analysis(details=tensor_stats['details'], force=force)
@@ -462,8 +415,7 @@ class Debug:
     
     def _collect_memory_metrics(self) -> Dict[str, Any]:
         """Collect current memory metrics."""
-        is_mps = is_mps_available()
-        has_gpu = is_mps or is_cuda_available()
+        has_gpu = is_cuda_available()
         
         metrics = {
             'vram_allocated': 0.0,
@@ -472,7 +424,6 @@ class Debug:
             'vram_total': 0.0,
             'vram_peak_alloc': 0.0,
             'vram_peak_rsv': 0.0,
-            'vram_overflow': 0.0,
             'ram_process': 0.0,
             'ram_available': 0.0,
             'ram_total': 0.0,
@@ -488,11 +439,8 @@ class Debug:
             if "error" not in vram_info and vram_info["total_gb"] > 0:
                 metrics['vram_free'] = vram_info["free_gb"]
                 metrics['vram_total'] = vram_info["total_gb"]
-                metrics['vram_overflow'] = max(0.0, metrics['vram_peak_rsv'] - metrics['vram_total'])
-                
-                backend = "Unified Memory" if is_mps else "VRAM"
                 metrics['summary_vram'] = (
-                    f"  [{backend}] {metrics['vram_allocated']:.2f}GB allocated / "
+                    f"  [VRAM] {metrics['vram_allocated']:.2f}GB allocated / "
                     f"{metrics['vram_reserved']:.2f}GB reserved / "
                     f"Peak: {metrics['vram_peak_alloc']:.2f}GB / "
                     f"{metrics['vram_free']:.2f}GB free / "
@@ -537,7 +485,7 @@ class Debug:
             try:
                 if torch.is_tensor(obj):
                     stats['total_count'] += 1
-                    is_gpu = obj.is_cuda or (hasattr(obj, 'is_mps') and obj.is_mps)
+                    is_gpu = obj.is_cuda
                     
                     if is_gpu:
                         stats['gpu_count'] += 1
@@ -649,15 +597,6 @@ class Debug:
             'phase4': 'Post-processing'
         }
         
-        is_mps = is_mps_available()
-        
-        # Get total VRAM for overflow formatting (Windows only)
-        total_vram_gb = 0.0
-        if not is_mps:
-            vram_info = get_basic_vram_info(device=None)
-            if "error" not in vram_info:
-                total_vram_gb = vram_info["total_gb"]
-        
         self.log("", category="none", force=force)
         self.log("────────────────────────", category="none", force=force)
         self.log("Peak memory by phase:", category="memory", force=force)
@@ -670,21 +609,13 @@ class Debug:
             rsv = self.phase_vram_peaks_rsv.get(phase_key, 0)
             ram = self.phase_ram_peaks.get(phase_key, 0)
             
-            if is_mps:
-                self.log(f"{phase_num}. {phase_name}: {alloc:.2f}GB", category="memory", indent_level=1, force=force)
-            else:
-                rsv_str = _format_peak_with_overflow(rsv, total_vram_gb)
-                self.log(f"{phase_num}. {phase_name}: VRAM {alloc:.2f}GB allocated, {rsv_str} | RAM {ram:.2f}GB", category="memory", indent_level=1, force=force)
+            self.log(f"{phase_num}. {phase_name}: VRAM {alloc:.2f}GB allocated, {rsv:.2f}GB reserved | RAM {ram:.2f}GB", category="memory", indent_level=1, force=force)
         
         overall_alloc = max(self.phase_vram_peaks_alloc.values()) if self.phase_vram_peaks_alloc else 0
         overall_rsv = max(self.phase_vram_peaks_rsv.values()) if self.phase_vram_peaks_rsv else 0
         overall_ram = max(self.phase_ram_peaks.values()) if self.phase_ram_peaks else 0
         
-        if is_mps:
-            self.log(f"Overall peak: {overall_alloc:.2f}GB", category="memory", force=force)
-        else:
-            overall_rsv_str = _format_peak_with_overflow(overall_rsv, total_vram_gb)
-            self.log(f"Overall peak: VRAM {overall_alloc:.2f}GB allocated, {overall_rsv_str} | RAM {overall_ram:.2f}GB", category="memory", force=force)
+        self.log(f"Overall peak: VRAM {overall_alloc:.2f}GB allocated, {overall_rsv:.2f}GB reserved | RAM {overall_ram:.2f}GB", category="memory", force=force)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings
     def _store_checkpoint(self, label: str, metrics: Dict[str, Any]) -> None:

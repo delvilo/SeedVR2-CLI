@@ -30,7 +30,6 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 from .generation_utils import (
     setup_video_transform,
     pad_video_temporal,
-    check_interrupt,
     ensure_precision_initialized,
     _draw_tile_boundaries,
     load_text_embeddings,
@@ -231,11 +230,7 @@ def encode_all_batches(
     if images is None:
         raise ValueError("Images to encode must be provided")
     else:
-        # MPS: keep on device to avoid sync overhead in Phase 4 color correction
-        if ctx['vae_device'].type == 'mps' and images.device.type != 'mps':
-            ctx['input_images'] = images.to(ctx['vae_device'])
-        else:
-            ctx['input_images'] = images
+        ctx['input_images'] = images
     
     # Get total frame count from context (set in video_upscaler before encoding)
     total_frames = ctx.get('total_frames', len(images))
@@ -344,7 +339,6 @@ def encode_all_batches(
         
         # Process encoding
         for batch_idx in range(0, total_frames, step):
-            check_interrupt(ctx)
             
             # Calculate indices with temporal overlap
             if batch_idx == 0:
@@ -492,7 +486,7 @@ def encode_all_batches(
             del transformed_video, rgb_video
             
             # Convert from VAE dtype to compute dtype and offload to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None and (cond_latents[0].is_cuda or cond_latents[0].is_mps):
+            if ctx['tensor_offload_device'] is not None and cond_latents[0].is_cuda:
                 ctx['all_latents'][encode_idx] = manage_tensor(
                     tensor=cond_latents[0],
                     target_device=ctx['tensor_offload_device'],
@@ -655,7 +649,6 @@ def upscale_all_batches(
             if latent is None:
                 continue
             
-            check_interrupt(ctx)
             
             debug.log(f"Upscaling batch {upscale_idx+1}/{num_valid_latents}", category="generation", force=True)
             # Reset seed for each batch to ensure identical RNG state
@@ -712,10 +705,9 @@ def upscale_all_batches(
                 dit_dtype = ctx['compute_dtype']  # Fallback for meta device or empty model
             
             # Use autocast if DiT dtype differs from compute dtype
-            # Skip autocast on MPS (CompatibleDiT already handles dtype conversion)
             debug.start_timer(f"dit_inference_{upscale_idx+1}")
             with torch.no_grad():
-                if dit_dtype != ctx['compute_dtype'] and ctx['dit_device'].type != 'mps':
+                if dit_dtype != ctx['compute_dtype']:
                     with torch.autocast(ctx['dit_device'].type, ctx['compute_dtype'], enabled=True):
                         upscaled_latents = runner.inference(
                             noises=noises,
@@ -731,7 +723,7 @@ def upscale_all_batches(
             debug.end_timer(f"dit_inference_{upscale_idx+1}", f"DiT inference {upscale_idx+1}")
             
             # Offload upscaled latents to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None and (upscaled_latents[0].is_cuda or upscaled_latents[0].is_mps):
+            if ctx['tensor_offload_device'] is not None and upscaled_latents[0].is_cuda:
                 ctx['all_upscaled_latents'][upscale_idx] = manage_tensor(
                     tensor=upscaled_latents[0],
                     target_device=ctx['tensor_offload_device'],
@@ -864,13 +856,7 @@ def decode_all_batches(
     
     # Pre-allocate final_video at the START of decode phase (before any batch processing)
     # This ensures we only need memory for final_video + 1 batch, not final_video + all batch_samples
-    # MPS: keep on device (unified memory, no benefit to CPU offload)
-    if ctx['tensor_offload_device'] is not None:
-        target_device = ctx['tensor_offload_device']
-    elif ctx['vae_device'].type == 'mps':
-        target_device = ctx['vae_device']
-    else:
-        target_device = 'cpu'
+    target_device = ctx['tensor_offload_device'] or 'cpu'
     channels_str = "RGBA" if C == 4 else "RGB"
     required_gb = (total_frames * true_h * true_w * C * 2) / (1024**3)
     debug.log(f"Pre-allocating output tensor: {total_frames} frames, {true_w}x{true_h}px, {channels_str} ({required_gb:.2f}GB)", 
@@ -916,7 +902,6 @@ def decode_all_batches(
             if upscaled_latent is None:
                 continue
             
-            check_interrupt(ctx)
             
             debug.log(f"Decoding batch {decode_idx+1}/{num_valid_latents}", category="vae", force=True)
             debug.start_timer(f"decode_batch_{decode_idx+1}")
@@ -1219,7 +1204,6 @@ def postprocess_all_batches(
     try:
         # Process each batch slice in final_video in-place
         for info_idx, (write_start, write_end, batch_idx, ori_length) in enumerate(batch_info_list):
-            check_interrupt(ctx)
             
             debug.log(f"Post-processing batch {info_idx+1}/{num_valid_samples}", category="video", force=True)
             debug.start_timer(f"postprocess_batch_{info_idx+1}")

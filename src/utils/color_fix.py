@@ -512,7 +512,7 @@ def _histogram_matching_channel(source: Tensor, reference: Tensor, device: torch
     
     del source_sorted, source_flat
     
-    # Reconstruct using argsort (portable across CUDA/ROCm/MPS)
+    # Reconstruct using argsort on CUDA.
     inverse_indices = torch.argsort(source_indices)
     del source_indices
     matched_flat = matched_sorted[inverse_indices]
@@ -760,7 +760,7 @@ def _histogram_match_1d(source: Tensor, reference: Tensor, device: torch.device)
     
     del source_sorted
     
-    # Reconstruct using argsort (portable across CUDA/ROCm/MPS)
+    # Reconstruct using argsort on CUDA.
     inverse_indices = torch.argsort(source_indices)
     del source_indices
     matched = matched_sorted[inverse_indices]

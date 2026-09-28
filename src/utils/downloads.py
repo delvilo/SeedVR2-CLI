@@ -14,7 +14,6 @@ import time
 from .model_registry import MODEL_REGISTRY, DEFAULT_VAE
 from .constants import (
     get_base_cache_dir,
-    get_all_model_paths,
     find_model_file,
     get_validation_cache_path,
     HUGGINGFACE_BASE_URL,
@@ -183,7 +182,7 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
         # Get model type for logging
         model_type = "VAE" if model_info.category == "vae" else "DiT"
         
-        # Check if file exists in any registered path first
+        # Resolve the model in the selected directory, including Drive mounts.
         existing_filepath = find_model_file(filename, fallback_dir=cache_dir)
         
         # Use existing file path if it exists, otherwise download to cache_dir
@@ -196,7 +195,7 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
             filepath = os.path.join(cache_dir, filename)
             # Debug log: Model not found, will need to download
             if debug:
-                searched_paths = get_all_model_paths()
+                searched_paths = [cache_dir]
                 debug.log(f"{model_type} model not found: {filename}", category="setup")
                 debug.log(f"Searched in {len(searched_paths)} location(s):", category="setup")
                 for i, path in enumerate(searched_paths, 1):
@@ -257,7 +256,7 @@ def download_weight(dit_model: str, vae_model: str, model_dir: Optional[str] = N
             
             if download_with_resume(url, filepath, debug):
                 # Validate downloaded file
-                if validate_file(filepath, expected_hash):
+                if validate_file(filepath, expected_hash, cache_dir):
                     if debug:
                         debug.log(f"Downloaded and validated: {filename}", 
                                  category="success", force=True)
