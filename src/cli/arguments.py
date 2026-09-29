@@ -13,24 +13,11 @@ from ..config import (
 from ..utils.model_registry import DEFAULT_DIT, get_available_dit_models
 
 
-def parse_arguments(argv: Sequence[str] | None = None) -> AppConfig:
-    """
-    Parse and validate command-line arguments for SeedVR2 CLI.
+def create_parser(invocation: str | None = None) -> argparse.ArgumentParser:
+    """Create and configure the CLI ArgumentParser."""
+    if invocation is None:
+        invocation = sys.argv[0]
 
-    Configures all available options including model selection, processing parameters,
-    memory optimization settings, and output configuration.
-
-    Returns:
-        Validated, immutable application settings
-
-    Note:
-        - Default model directory resolves to the repo's models/SEEDVR2 if not specified
-    """
-
-    # Get the actual invocation path for usage examples
-    invocation = sys.argv[0]
-
-    # Multi-line usage examples for --help
     usage_examples = f"""
 Examples:
 
@@ -60,7 +47,22 @@ Examples:
         allow_abbrev=False
     )
 
-    # Input/Output
+    _add_io_group(parser)
+    _add_model_group(parser)
+    _add_processing_group(parser)
+    _add_quality_group(parser)
+    _add_device_group(parser)
+    _add_memory_group(parser)
+    _add_blockswap_group(parser)
+    _add_vae_group(parser)
+    _add_perf_group(parser)
+    _add_cache_group(parser)
+    _add_debug_group(parser)
+
+    return parser
+
+
+def _add_io_group(parser: argparse.ArgumentParser) -> None:
     io_group = parser.add_argument_group('Input/Output options')
     io_group.add_argument("input", type=str,
                         help="Input: video file (.mp4, .avi, etc.), image file (.png, .jpg, etc.), or directory")
@@ -72,17 +74,19 @@ Examples:
                         help="Video encoder backend: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH)")
     io_group.add_argument("--10bit", dest="use_10bit", action="store_true",
                         help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
-                         "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
+                             "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
     io_group.add_argument("--model_dir", type=str, default=None,
                         help="Model directory (default: $SEEDVR2_MODEL_DIR or repo/models/SEEDVR2)")
 
-    # Model Selection
+
+def _add_model_group(parser: argparse.ArgumentParser) -> None:
     model_group = parser.add_argument_group('Model selection')
     model_group.add_argument("--dit_model", type=str, default=DEFAULT_DIT,
                         choices=get_available_dit_models(),
                         help="DiT model to use. Options: 3B (fp16/fp8/GGUF) or 7B (fp16/fp8/GGUF). Default: 3B FP8")
 
-    # Processing Parameters
+
+def _add_processing_group(parser: argparse.ArgumentParser) -> None:
     process_group = parser.add_argument_group('Processing parameters')
     process_group.add_argument("--resolution", type=int, default=1080,
                         help="Target short-side resolution in pixels (default: 1080)")
@@ -90,11 +94,11 @@ Examples:
                         help="Maximum resolution for any edge. Scales down if exceeded. 0 = no limit (default: 0)")
     process_group.add_argument("--batch_size", type=int, default=5,
                         help="Frames per batch (must follow 4n+1: 1, 5, 9, 13, 17, 21,...). "
-                         "Ideally matches shot length for best temporal consistency. Higher values improve "
-                         "quality and speed but require more VRAM. Default: 5")
+                             "Ideally matches shot length for best temporal consistency. Higher values improve "
+                             "quality and speed but require more VRAM. Default: 5")
     process_group.add_argument("--uniform_batch_size", action="store_true",
                         help="Pad final batch to match batch_size. Prevents temporal artifacts caused by small "
-                         "final batches. Add extra compute but recommended for optimal quality.")
+                             "final batches. Add extra compute but recommended for optimal quality.")
     process_group.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility (default: 42)")
     process_group.add_argument("--skip_first_frames", type=int, default=0,
@@ -108,7 +112,8 @@ Examples:
     process_group.add_argument("--temporal_overlap", type=int, default=0,
                         help="Frames to overlap between batches/chunks for smooth blending (default: 0)")
 
-    # Quality Control
+
+def _add_quality_group(parser: argparse.ArgumentParser) -> None:
     quality_group = parser.add_argument_group('Quality control')
     quality_group.add_argument("--color_correction", type=str, default="lab",
                     choices=["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"],
@@ -120,7 +125,8 @@ Examples:
     quality_group.add_argument("--latent_noise_scale", type=float, default=0.0,
                         help="Latent noise injection scale (0.0-1.0). Adds variation to latent space (default: 0.0)")
 
-    # Device Management
+
+def _add_device_group(parser: argparse.ArgumentParser) -> None:
     device_group = parser.add_argument_group('Device management')
     device_group.add_argument("--cuda_device", type=int, default=None,
                     help="One visible CUDA device index; default: device 0")
@@ -132,6 +138,8 @@ Examples:
     device_group.add_argument("--tensor_offload_device", type=str, default="cpu",
                         help="Intermediate tensor storage: 'cpu' (recommended) or 'none' (keep on selected GPU). Default: cpu")
 
+
+def _add_memory_group(parser: argparse.ArgumentParser) -> None:
     memory_group = parser.add_argument_group('Memory budgets (GiB; planning estimates, not hard limits)')
     memory_group.add_argument('--ram_budget_gb', type=float, default=0, help='Total free RAM allowance; 0 = 80%% of available RAM')
     memory_group.add_argument('--vram_budget_gb', type=float, default=0, help='Free VRAM allowance; 0 = 90%% of available VRAM')
@@ -140,7 +148,8 @@ Examples:
     memory_group.add_argument('--memory_report', type=str, default=None, help='Append phase RSS/CUDA peaks and retry events to JSONL')
     memory_group.add_argument('--oom_retries', type=int, default=3, help='File restarts with smaller chunk/batch/tile sizes after OOM; 0 disables retries')
 
-    # Memory Optimization (BlockSwap)
+
+def _add_blockswap_group(parser: argparse.ArgumentParser) -> None:
     blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
     blockswap_group.add_argument("--blocks_to_swap", type=int, default=0,
                         help="Requested minimum blocks to swap for VRAM savings. 0-32 (3B) or 0-36 (7B). "
@@ -148,7 +157,8 @@ Examples:
     blockswap_group.add_argument("--swap_io_components", action="store_true",
                         help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
 
-    # VAE Tiling
+
+def _add_vae_group(parser: argparse.ArgumentParser) -> None:
     vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')
     vae_group.add_argument("--vae_encode_tiled", action=argparse.BooleanOptionalAction, default=True,
                         help="Enable VAE encode tiling to reduce VRAM during encoding (default: enabled)")
@@ -165,7 +175,8 @@ Examples:
     vae_group.add_argument("--tile_debug", type=str, default="false", choices=["false", "encode", "decode"],
                         help="Visualize tiles: 'false' (default), 'encode', or 'decode'")
 
-    # Performance
+
+def _add_perf_group(parser: argparse.ArgumentParser) -> None:
     perf_group = parser.add_argument_group('Performance optimization')
     perf_group.add_argument("--attention_mode", type=str, default="sdpa",
                         choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
@@ -188,21 +199,23 @@ Examples:
     perf_group.add_argument("--compile_dynamo_recompile_limit", type=int, default=128,
                         help="Max recompilation attempts before fallback to eager mode. Safety limit to prevent compilation loops (default: 128)")
 
-    # Model Caching (for batch processing)
+
+def _add_cache_group(parser: argparse.ArgumentParser) -> None:
     cache_group = parser.add_argument_group('Model caching (batch processing)')
     cache_group.add_argument("--cache_dit", action="store_true",
                         help="Keep DiT model in memory between files. Subject to cache memory caps; idle models default to CPU")
     cache_group.add_argument("--cache_vae", action="store_true",
                         help="Keep VAE model in memory between files. Subject to cache memory caps; idle models default to CPU")
 
-    # Debugging
+
+def _add_debug_group(parser: argparse.ArgumentParser) -> None:
     debug_group = parser.add_argument_group('Debugging')
     debug_group.add_argument("--debug", action="store_true",
                         help="Enable verbose debug logging")
 
-    # Auto-show help if no arguments provided
-    argv = list(sys.argv[1:] if argv is None else argv)
-    args = parser.parse_args(argv or ['--help'])
+
+def _validate_parsed_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Validate parsed command-line arguments, raising parser errors if invalid."""
     for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap',
                  'oom_retries', 'ram_budget_gb', 'vram_budget_gb', 'cache_vram_gb', 'cache_ram_gb'):
         value = getattr(args, name)
@@ -220,6 +233,25 @@ Examples:
         parser.error('--10bit requires --video_backend ffmpeg')
     if args.cuda_device is not None and args.cuda_device < 0:
         parser.error("--cuda_device must be a non-negative CUDA device index")
+
+
+def parse_arguments(argv: Sequence[str] | None = None) -> AppConfig:
+    """
+    Parse and validate command-line arguments for SeedVR2 CLI.
+
+    Configures all available options including model selection, processing parameters,
+    memory optimization settings, and output configuration.
+
+    Returns:
+        Validated, immutable application settings
+
+    Note:
+        - Default model directory resolves to the repo's models/SEEDVR2 if not specified
+    """
+    parser = create_parser()
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv or ['--help'])
+    _validate_parsed_arguments(parser, args)
     return config_from_namespace(args)
 
 
