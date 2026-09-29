@@ -173,10 +173,10 @@ class Upsample3D(nn.Module):
         else:
             hidden_states = [hidden_states]
 
-        for i in range(len(hidden_states)):
-            hidden_states[i] = self.upscale_conv(hidden_states[i])
+        for i, hidden_state in enumerate(hidden_states):
+            hidden_state = self.upscale_conv(hidden_state)
             hidden_states[i] = rearrange(
-                hidden_states[i],
+                hidden_state,
                 "b (x y z c) f h w -> b c (f z) (h x) (w y)",
                 x=self.spatial_ratio,
                 y=self.spatial_ratio,
