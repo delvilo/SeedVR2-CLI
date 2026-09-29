@@ -173,15 +173,16 @@ class Upsample3D(nn.Module):
         else:
             hidden_states = [hidden_states]
 
-        for i in range(len(hidden_states)):
-            hidden_states[i] = self.upscale_conv(hidden_states[i])
-            hidden_states[i] = rearrange(
-                hidden_states[i],
+        hidden_states = [
+            rearrange(
+                self.upscale_conv(hs),
                 "b (x y z c) f h w -> b c (f z) (h x) (w y)",
                 x=self.spatial_ratio,
                 y=self.spatial_ratio,
                 z=self.temporal_ratio,
             )
+            for hs in hidden_states
+        ]
 
         # [Overridden] For causal temporal conv
         if self.temporal_up and memory_state != MemoryState.ACTIVE:
