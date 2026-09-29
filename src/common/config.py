@@ -49,13 +49,11 @@ def resolve_recursive(
 ) -> Any:
     config = resolver(config)
     if isinstance(config, DictConfig):
-        for k in config.keys():
-            v = config.get(k)
+        for k, v in config.items():
             if isinstance(v, (DictConfig, ListConfig)):
                 config[k] = resolve_recursive(v, resolver)
-    if isinstance(config, ListConfig):
-        for i in range(len(config)):
-            v = config.get(i)
+    elif isinstance(config, ListConfig):
+        for i, v in enumerate(config):
             if isinstance(v, (DictConfig, ListConfig)):
                 config[i] = resolve_recursive(v, resolver)
     return config
