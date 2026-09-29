@@ -19,6 +19,8 @@ from omegaconf import DictConfig, ListConfig
 from torch import Tensor
 from ..common.diffusion import (
     classifier_free_guidance_dispatcher,
+)
+from ..common.diffusion.config import (
     create_sampler_from_config,
     create_sampling_timesteps_from_config,
     create_schedule_from_config,

@@ -16,11 +16,6 @@
 Diffusion package.
 """
 
-from .config import (
-    create_sampler_from_config,
-    create_sampling_timesteps_from_config,
-    create_schedule_from_config,
-)
 from .samplers.base import Sampler
 from .samplers.euler import EulerSampler
 from .schedules.base import Schedule
@@ -31,13 +26,8 @@ from .types import PredictionType, SamplingDirection
 from .utils import classifier_free_guidance, classifier_free_guidance_dispatcher, expand_dims
 
 __all__ = [
-    # Configs
-    "create_sampler_from_config",
-    "create_sampling_timesteps_from_config",
-    "create_schedule_from_config",
     # Schedules
     "Schedule",
-    "DiscreteVariancePreservingSchedule",
     "LinearInterpolationSchedule",
     # Samplers
     "Sampler",
