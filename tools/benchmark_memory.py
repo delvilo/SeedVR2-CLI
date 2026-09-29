@@ -21,7 +21,7 @@ def measure(mode, frames, batch_size, width, height):
     import torch
     # Import the same runtime modules before measuring either mode.
     from src.core.streaming import blend_decoded_batches
-    from src.utils.media import frame_pixels
+    from src.media.output import frame_pixels
     from src.optimization.memory_profile import process_rss_bytes
     torch.set_num_threads(1)
     torch.zeros(1).add_(1)  # initialize CPU allocator

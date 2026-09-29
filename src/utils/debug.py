@@ -67,6 +67,7 @@ class Debug:
     
     def __init__(self, enabled: bool = False, show_timestamps: bool = True):
         self.enabled = enabled
+        self.external_memory_recorder: bool = False
         self.show_timestamps = show_timestamps
         self.timers: Dict[str, float] = {}
         self.memory_checkpoints: List[Dict[str, Any]] = []

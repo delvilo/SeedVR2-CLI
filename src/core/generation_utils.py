@@ -26,6 +26,10 @@ Debugging Utilities:
 These utilities support the 4-phase pipeline implemented in generation_phases.py.
 """
 
+from .context import GenerationContext
+
+from ..config import BlockSwapConfig, CompileConfig
+
 import os
 import torch
 from typing import Dict, List, Optional, Tuple, Any, Callable, Union
@@ -83,14 +87,14 @@ def prepare_video_transforms(resolution: int, max_resolution: int = 0, debug: Op
     ])
 
 
-def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: int = 0, 
+def setup_video_transform(ctx: GenerationContext, resolution: int, max_resolution: int = 0,
                          debug: Optional['Debug'] = None, 
                          sample_frame: Optional[torch.Tensor] = None) -> Tuple[int, int, int, int]:
     """
     Setup video transformation pipeline and compute target dimensions.
     
     Args:
-        ctx: Generation context dictionary
+        ctx: Generation context object
         resolution: Target resolution for shortest edge
         max_resolution: Maximum resolution for any edge (0 = no limit)
         debug: Debug instance for logging
@@ -101,13 +105,13 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
         (0, 0, 0, 0) otherwise
     """
     # Check if transform exists AND is not None
-    existing_transform = ctx.get('video_transform')
+    existing_transform = ctx.video_transform
     
     if existing_transform is not None:
         # Transform exists - check if we need to compute dimensions
-        if 'true_target_dims' in ctx and sample_frame is not None:
+        if ctx.true_target_dims is not None and sample_frame is not None:
             # Return cached dimensions + recompute padded from sample
-            true_h, true_w = ctx['true_target_dims']
+            true_h, true_w = ctx.true_target_dims
             transformed = existing_transform(sample_frame)
             padded_h, padded_w = transformed.shape[-2:]
             if debug:
@@ -118,7 +122,7 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
         return 0, 0, 0, 0
     
     # Create transformation pipeline (first time or after cleanup)
-    ctx['video_transform'] = prepare_video_transforms(resolution, max_resolution, debug)
+    ctx.video_transform = prepare_video_transforms(resolution, max_resolution, debug)
     
     # Compute dimensions if sample frame provided
     if sample_frame is not None:
@@ -135,10 +139,10 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
         true_w = (true_w // 2) * 2
         
         # Cache for later use in trimming
-        ctx['true_target_dims'] = (true_h, true_w)
+        ctx.true_target_dims = (true_h, true_w)
         
         # Get padded dimensions
-        transformed_sample = ctx['video_transform'](sample_frame)
+        transformed_sample = ctx.video_transform(sample_frame)
         padded_h, padded_w = transformed_sample.shape[-2:]
         
         if debug:
@@ -156,7 +160,7 @@ def setup_video_transform(ctx: Dict[str, Any], resolution: int, max_resolution: 
 
 
 def compute_generation_info(
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     images: torch.Tensor,
     resolution: int = 1080,
     max_resolution: int = 0,
@@ -171,7 +175,7 @@ def compute_generation_info(
     Compute all generation parameters and dimensions for logging.
     
     Args:
-        ctx: Generation context dictionary
+        ctx: Generation context object
         images: Input frames tensor [T, H, W, C]
         resolution: Target resolution for shortest edge
         max_resolution: Maximum resolution for any edge (0 = no limit)
@@ -198,7 +202,7 @@ def compute_generation_info(
     
     # Track total frames after prepending
     total_frames = len(images)
-    ctx['total_frames'] = total_frames
+    ctx.total_frames = total_frames
     
     # Setup transform and compute dimensions on final frame count
     sample_frame = images[0].permute(2, 0, 1).unsqueeze(0).to(torch.float32)
@@ -318,12 +322,12 @@ def setup_generation_context(
     vae_offload_device: Optional[Union[str, torch.device]] = None,
     tensor_offload_device: Optional[Union[str, torch.device]] = None,
     debug: Optional['Debug'] = None
-) -> Dict[str, Any]:
+) -> GenerationContext:
     """
     Initialize generation context with device configuration.
     
     Processes device objects, configures environment variables, and creates the
-    generation context dictionary with all necessary state.
+    generation context object with all necessary state.
     
     Args:
         dit_device: Device for DiT model (str or torch.device, defaults to 'cpu')
@@ -334,7 +338,7 @@ def setup_generation_context(
         debug: Debug instance for logging
         
     Returns:
-        Dict[str, Any]: Generation context dictionary with torch.device objects
+        GenerationContext: Invocation state with torch.device objects
     """
     # Normalize devices to torch.device objects (follows PyTorch convention)
     def _normalize_device(device_spec: Optional[Union[str, torch.device]]) -> torch.device:
@@ -356,20 +360,12 @@ def setup_generation_context(
     os.environ.setdefault("LOCAL_RANK", "0")
     
     # Create generation context
-    ctx = {
-        'dit_device': dit_device,
-        'vae_device': vae_device,
-        'dit_offload_device': dit_offload_device,
-        'vae_offload_device': vae_offload_device,
-        'tensor_offload_device': tensor_offload_device,
-        'compute_dtype': COMPUTE_DTYPE,
-        'video_transform': None,
-        'text_embeds': None,
-        'all_latents': [],
-        'all_upscaled_latents': [],
-        'batch_samples': [],
-        'final_video': None,
-    }
+    ctx = GenerationContext(
+        dit_device=dit_device, vae_device=vae_device,
+        dit_offload_device=dit_offload_device, vae_offload_device=vae_offload_device,
+        tensor_offload_device=tensor_offload_device, compute_dtype=COMPUTE_DTYPE,
+    )
+
     
     if debug:
         # Build device configuration summary
@@ -390,13 +386,13 @@ def setup_generation_context(
             f"LOCAL_RANK={os.environ['LOCAL_RANK']}",
             category="setup"
         )
-        if ctx['compute_dtype'] == torch.float32:
+        if ctx.compute_dtype == torch.float32:
             reason = "quality"
         elif not BFLOAT16_SUPPORTED:
             reason = "compatibility (GPU lacks bfloat16 CUBLAS - 7B models unsupported, 3B may have artifacts)"
         else:
             reason = "performance"
-        debug.log(f"Unified compute dtype: {ctx['compute_dtype']} across entire pipeline for maximum {reason}", category="precision")
+        debug.log(f"Unified compute dtype: {ctx.compute_dtype} across entire pipeline for maximum {reason}", category="precision")
     
     return ctx
 
@@ -406,11 +402,11 @@ def prepare_runner(
     vae_model: str,
     model_dir: str,
     debug: 'Debug',
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     dit_cache: bool = False,
     vae_cache: bool = False,
     session=None,
-    block_swap_config: Optional[Dict[str, Any]] = None,
+    block_swap_config: Optional[BlockSwapConfig] = None,
     encode_tiled: bool = False,
     encode_tile_size: Optional[Tuple[int, int]] = None,
     encode_tile_overlap: Optional[Tuple[int, int]] = None,
@@ -419,11 +415,11 @@ def prepare_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
-    torch_compile_args_dit: Optional[Dict[str, Any]] = None,
-    torch_compile_args_vae: Optional[Dict[str, Any]] = None
-) -> Tuple['VideoDiffusionInfer', Dict[str, Any]]:
+    torch_compile_args_dit: Optional[CompileConfig] = None,
+    torch_compile_args_vae: Optional[CompileConfig] = None
+) -> 'VideoDiffusionInfer':
     """
-    Prepare runner with model state management and global cache integration.
+    Prepare runner with model state management and session cache integration.
     Handles model changes and caching logic with independent DiT/VAE caching support.
     
     Args:
@@ -448,11 +444,9 @@ def prepare_runner(
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
     Returns:
-        Tuple['VideoDiffusionInfer', Dict[str, Any]]: Tuple containing:
-            - VideoDiffusionInfer: Configured runner instance with models loaded and settings applied
-            - Dict[str, Any]: Cache context dictionary containing cache state and metadata with keys:
-                - 'cached_dit', 'cached_vae': Cached model instances (if found)
-        
+        Configured runner. Its session owns reusable models; no tensor cache
+        dictionary escapes this call.
+
     Features:
         - Independent DiT and VAE caching for flexible memory management
         - Dynamic model reloading when models change
@@ -460,12 +454,9 @@ def prepare_runner(
         - Separate encode/decode tiling configuration for optimal performance
         - Memory optimization and BlockSwap integration
     """
-    dit_changed = False
-    vae_changed = False
-    
     # Configure runner
     debug.log("Configuring inference runner...", category="runner")
-    runner, cache_context = configure_runner(
+    runner = configure_runner(
         dit_model=dit_model,
         vae_model=vae_model,
         base_cache_dir=model_dir,
@@ -487,7 +478,7 @@ def prepare_runner(
         torch_compile_args_vae=torch_compile_args_vae
     )
 
-    return runner, cache_context
+    return runner
 
 
 def load_text_embeddings(script_directory: str, device: torch.device, 
@@ -743,7 +734,7 @@ def _draw_tile_boundaries(image: torch.Tensor, debug: 'Debug', tile_boundaries: 
 
 
 def ensure_precision_initialized(
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     runner: 'VideoDiffusionInfer',
     debug: Optional['Debug'] = None
 ) -> None:
@@ -754,7 +745,7 @@ def ensure_precision_initialized(
     this function only logs model dtypes for informational purposes.
     
     Args:
-        ctx: Generation context dictionary (compute_dtype already set)
+        ctx: Generation context object (compute_dtype already set)
         runner: VideoDiffusionInfer instance with loaded models
         debug: Optional Debug instance for logging
     """
@@ -788,7 +779,7 @@ def ensure_precision_initialized(
             parts.append(f"DiT={dit_dtype}")
         if vae_dtype is not None:
             parts.append(f"VAE={vae_dtype}")
-        parts.append(f"compute={ctx['compute_dtype']}")
+        parts.append(f"compute={ctx.compute_dtype}")
         
         if parts:
             debug.log(f"Model precision: {', '.join(parts)}", category="precision")

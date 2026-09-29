@@ -12,6 +12,8 @@ Key Features:
 - I/O component offloading for maximum memory savings
 """
 
+from ..config import BlockSwapConfig
+
 import time
 import types
 import torch
@@ -23,7 +25,7 @@ from .compatibility import call_rope_with_stability
 from ..common.distributed import get_device
 
 
-def is_blockswap_enabled(config: Optional[Dict[str, Any]]) -> bool:
+def is_blockswap_enabled(config: Optional[BlockSwapConfig]) -> bool:
     """
     Check if BlockSwap configuration indicates BlockSwap should be enabled.
     
@@ -31,7 +33,7 @@ def is_blockswap_enabled(config: Optional[Dict[str, Any]]) -> bool:
     This is the authoritative function for determining BlockSwap status from configuration.
     
     Args:
-        config: BlockSwap configuration dictionary with optional keys:
+        config: BlockSwap configuration object with optional keys:
             - blocks_to_swap: Number of blocks to offload (0 = disabled)
             - swap_io_components: Whether to offload I/O components
         
@@ -41,18 +43,18 @@ def is_blockswap_enabled(config: Optional[Dict[str, Any]]) -> bool:
     if not config:
         return False
     
-    blocks_to_swap = config.get("blocks_to_swap", 0)
-    swap_io_components = config.get("swap_io_components", False)
+    blocks_to_swap = config.blocks_to_swap
+    swap_io_components = config.swap_io_components
     
     return blocks_to_swap > 0 or swap_io_components
 
 
 def validate_blockswap_config(
-    block_swap_config: Optional[Dict[str, Any]],
+    block_swap_config: Optional[BlockSwapConfig],
     dit_device: 'torch.device',
     dit_offload_device: Optional['torch.device'],
     debug: 'Debug'
-) -> Optional[Dict[str, Any]]:
+) -> Optional[BlockSwapConfig]:
     """
     Validate and potentially modify BlockSwap configuration.
     
@@ -62,7 +64,7 @@ def validate_blockswap_config(
     called early in configure_runner() before any model loading.
     
     Args:
-        block_swap_config: BlockSwap configuration dictionary (may be None)
+        block_swap_config: BlockSwap configuration object (may be None)
         dit_device: Target device for DiT model inference
         dit_offload_device: Device for offloading DiT blocks (may be None)
         debug: Debug instance for logging warnings/errors
@@ -76,8 +78,8 @@ def validate_blockswap_config(
     if not is_blockswap_enabled(block_swap_config):
         return block_swap_config
     
-    blocks_to_swap = block_swap_config.get("blocks_to_swap", 0)
-    swap_io_components = block_swap_config.get("swap_io_components", False)
+    blocks_to_swap = block_swap_config.blocks_to_swap
+    swap_io_components = block_swap_config.swap_io_components
     
     # Validate offload_device is set and different from dit_device
     offload_device_valid = (
@@ -143,7 +145,7 @@ def get_module_memory_mb(module: torch.nn.Module) -> float:
 
 def apply_block_swap_to_dit(
     runner: 'VideoDiffusionInfer',
-    block_swap_config: Dict[str, Any],
+    block_swap_config: BlockSwapConfig,
     debug: 'Debug'
 ) -> None:
     """
@@ -155,7 +157,7 @@ def apply_block_swap_to_dit(
     
     Args:
         runner: VideoDiffusionInfer instance containing the model
-        block_swap_config: Configuration dictionary with keys:
+        block_swap_config: Configuration object with fields:
             - blocks_to_swap: Number of blocks to swap (from the start)
             - swap_io_components: Whether to offload I/O components  
             - enable_debug: Whether to enable debug logging
@@ -166,8 +168,8 @@ def apply_block_swap_to_dit(
     if not is_blockswap_enabled(block_swap_config):
         return
 
-    blocks_to_swap = block_swap_config.get("blocks_to_swap", 0)
-    swap_io_components = block_swap_config.get("swap_io_components", False)
+    blocks_to_swap = block_swap_config.blocks_to_swap
+    swap_io_components = block_swap_config.swap_io_components
     
     # Early return only if both block swap and I/O swap are disabled
     if blocks_to_swap <= 0 and not swap_io_components:
@@ -191,7 +193,7 @@ def apply_block_swap_to_dit(
         device = runner._dit_device
     else:
         device = get_device()
-    offload_device = block_swap_config.get("offload_device", torch.device('cpu'))
+    offload_device = block_swap_config.offload_device
 
     # Validate model structure
     if not hasattr(model, "blocks"):

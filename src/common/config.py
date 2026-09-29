@@ -19,7 +19,7 @@ Configuration utility functions
 import importlib
 from typing import Any, Callable, List, Union
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from ..utils.model_registry import MODEL_CLASSES
+
 
 try:
     OmegaConf.register_new_resolver("eval", eval)
@@ -99,9 +99,14 @@ def import_item(path: str, name: str) -> Any:
     Returns:
         Imported object
     """
-    # Simple lookup with path as key
-    if path in MODEL_CLASSES:
-        return MODEL_CLASSES[path]
+    # Resolve supported model classes only when loading the runner.
+    model_classes = {
+        "dit_3b.nadit": ("src.models.dit_3b.nadit", "NaDiT"),
+        "dit_7b.nadit": ("src.models.dit_7b.nadit", "NaDiT"),
+        "video_vae_v3.modules.attn_video_vae": ("src.models.video_vae_v3.modules.attn_video_vae", "VideoAutoencoderKLWrapper"),
+    }
+    if path in model_classes:
+        path, name = model_classes[path]
     
     # Fallback to dynamic import for everything else
     try:

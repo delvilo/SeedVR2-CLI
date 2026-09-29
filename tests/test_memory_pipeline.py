@@ -3,7 +3,7 @@
 The diffusion weights are deliberately replaced by tiny runners. These tests do
 not claim GPU quality or performance coverage; see docs/memory.md for that gate.
 """
-from argparse import Namespace
+from dataclasses import replace
 from contextlib import closing
 import copy
 import json
@@ -20,7 +20,10 @@ import numpy as np
 import pytest
 import torch
 
-import inference_cli as cli
+from src.cli import arguments
+from src.core import pipeline, scheduler
+from src.core.context import GenerationContext
+from src.media import reader, output
 from src.core.generation_phases import decode_all_batches, postprocess_all_batches, _prepare_video_batch
 from src.core.generation_utils import blend_overlapping_frames
 from src.core.session import InferenceSession, resident_bytes
@@ -29,7 +32,8 @@ from src.optimization.memory_budget import GIB, plan_memory, reduce_workload, is
 from src.optimization.memory_manager import release_tensor_collection
 from src.optimization.memory_profile import MemoryRecorder
 from src.utils.debug import Debug
-from src.utils.media import read_frames, frame_pixels, FFMPEGVideoWriter, OutputTransaction
+from src.media.reader import read_frames
+from src.media.output import frame_pixels, FFMPEGVideoWriter, OutputTransaction
 
 # Small CPU test tensors should not start a large OpenMP thread pool.
 torch.set_num_threads(1)
@@ -52,11 +56,14 @@ class Capture:
 
 
 def args(monkeypatch, **values):
-    monkeypatch.setattr(sys, 'argv', ['inference_cli.py', 'input.mp4'])
-    result = cli.parse_arguments()
-    result.output_format = 'mp4'
-    vars(result).update(values)
-    return result
+    argv = ['input.mp4', '--output_format', 'mp4']
+    for key, value in values.items():
+        if isinstance(value, bool):
+            if value:
+                argv.append('--' + key)
+        else:
+            argv.extend(['--' + key, str(value)])
+    return arguments.parse_arguments(argv)
 
 
 def test_uint8_input_and_per_batch_normalization():
@@ -123,7 +130,7 @@ def fake_runner(decoded):
 def context(lengths=(5, 5, 4), overlap=3):
     total = lengths[0] + sum(n - overlap for n in lengths[1:])
     starts = [i * (lengths[0] - overlap) for i in range(len(lengths))]
-    return dict(all_upscaled_latents=[torch.zeros(1) for _ in lengths], all_ori_lengths=list(lengths),
+    return GenerationContext(all_upscaled_latents=[torch.zeros(1) for _ in lengths], all_ori_lengths=list(lengths),
                 true_target_dims=(8, 8), total_frames=total, tensor_offload_device=torch.device('cpu'),
                 vae_device=torch.device('cpu'), postprocess_device=torch.device('cpu'), compute_dtype=torch.bfloat16,
                 actual_temporal_overlap=overlap, is_rgba=False,
@@ -136,42 +143,42 @@ def context(lengths=(5, 5, 4), overlap=3):
 def test_streamed_postprocess_matches_four_phase_reference(color):
     torch.manual_seed(7)
     ctx = context()
-    decoded = [torch.rand(3, n, 8, 8).bfloat16().mul(2).sub(1) for n in ctx['all_ori_lengths']]
+    decoded = [torch.rand(3, n, 8, 8).bfloat16().mul(2).sub(1) for n in ctx.all_ori_lengths]
     reference = copy.deepcopy(ctx)
     debug = Debug(enabled=False)
     decode_all_batches(fake_runner(decoded), reference, debug)
     postprocess_all_batches(reference, debug, color_correction=color)
     result = torch.cat(list(iter_output_batches(fake_runner(decoded), ctx, debug, color)))
-    torch.testing.assert_close(result, reference['final_video'], atol=0, rtol=0)
-    assert 'final_video' not in ctx
-    assert 'all_upscaled_latents' not in ctx
+    torch.testing.assert_close(result, reference.final_video, atol=0, rtol=0)
+    assert ctx.final_video is None
+    assert ctx.all_upscaled_latents is None
 
 
 def test_rgba_alpha_matches_existing_processing():
     ctx = context(lengths=(1,), overlap=0)
-    ctx.update(is_rgba=True, all_alpha_channels=[torch.full((1, 1, 8, 8), .25)],
+    ctx = replace(ctx, is_rgba=True, all_alpha_channels=[torch.full((1, 1, 8, 8), .25)],
                all_input_rgb=[torch.full((1, 3, 8, 8), .5)])
     decoded = [torch.zeros(3, 1, 8, 8, dtype=torch.bfloat16)]
     reference = copy.deepcopy(ctx)
     decode_all_batches(fake_runner(decoded), reference, Debug(False))
     postprocess_all_batches(reference, Debug(False), color_correction='none')
     result = torch.cat(list(iter_output_batches(fake_runner(decoded), ctx, Debug(False), 'none')))
-    torch.testing.assert_close(result, reference['final_video'], rtol=0, atol=0)
+    torch.testing.assert_close(result, reference.final_video, rtol=0, atol=0)
     assert result.shape == (1, 8, 8, 4)
     torch.testing.assert_close(result[..., :3], torch.full_like(result[..., :3], .5))
     assert torch.isfinite(result).all()
     assert (result[..., 3] < 1).all()
-    assert ctx['all_alpha_channels'] == [None]
+    assert ctx.all_alpha_channels == [None]
 
 
 def test_generator_close_releases_models_and_latents():
     ctx = context()
-    decoded = [torch.zeros(3, n, 8, 8, dtype=torch.bfloat16) for n in ctx['all_ori_lengths']]
+    decoded = [torch.zeros(3, n, 8, 8, dtype=torch.bfloat16) for n in ctx.all_ori_lengths]
     runner = fake_runner(decoded)
     with closing(iter_output_batches(runner, ctx, Debug(False), 'none', cache_model=True)) as outputs:
         next(outputs)
     assert runner.vae is None
-    assert 'all_upscaled_latents' not in ctx
+    assert ctx.all_upscaled_latents is None
 
 
 def test_tiled_vae_accumulation_preserves_pixels_on_cpu():
@@ -223,10 +230,12 @@ def test_budget_and_oom_ladder(monkeypatch):
     with pytest.raises(MemoryError):
         plan_memory(1920, 1080, 2160, 0, 33, 33, 3, 1)
     options = args(monkeypatch, batch_size=33, chunk_size=100, temporal_overlap=3)
-    assert reduce_workload(options)
-    assert options.seed == 42 and options.resolution == 1080
-    assert options.batch_size < 33 and options.batch_size % 4 == 1
-    assert options.temporal_overlap < options.batch_size
+    reduced, video = reduce_workload(options.inference, options.video)
+    assert options.inference.sampling.batch_size == 33
+    options = replace(options, inference=reduced, video=video)
+    assert options.inference.sampling.seed == 42 and options.inference.sampling.resolution == 1080
+    assert options.inference.sampling.batch_size < 33 and options.inference.sampling.batch_size % 4 == 1
+    assert options.inference.sampling.temporal_overlap < options.inference.sampling.batch_size
     assert is_oom(torch.cuda.OutOfMemoryError('allocation'))
     assert is_oom(MemoryError())
     assert not is_oom(ValueError('bad input'))
@@ -275,11 +284,13 @@ def test_chunk_stream_keeps_uint8_and_drops_only_context(monkeypatch):
     observed = []
     def process(frames, opts, *unused):
         assert frames.dtype == torch.uint8
-        observed.append((len(frames), opts.prepend_frames))
+        observed.append((len(frames), opts.sampling.prepend_frames))
         for start in range(0, len(frames), 2):
             yield frames[start:start + 2].float().div(255)
-    monkeypatch.setattr(cli, '_iter_processed_batches', process)
-    outputs = list(cli._stream_video_chunks(Capture(13), 13, 5, 3, options, 'cpu', Debug(False), None))
+    source = SimpleNamespace(count=13, read=lambda n: read_frames(cap, n))
+    cap = Capture(13)
+    session = SimpleNamespace(iter_batches=process)
+    outputs = list(scheduler.stream_video_chunks(source, options.inference, options.video, 'cpu', Debug(False), session))
     actual = torch.cat(outputs)[:, 0, 0, 0]
     torch.testing.assert_close(actual, torch.arange(13).float() / 255)
     assert observed == [(5, 2), (8, 0), (6, 0)]
@@ -291,17 +302,20 @@ def test_oom_restarts_file_without_publishing_partial_results(tmp_path, monkeypa
     dest = tmp_path / 'output.png'
     dest.write_bytes(b'old')
     options = args(monkeypatch, output_format='png', chunk_size=33, batch_size=9)
-    monkeypatch.setattr(cli, '_plan_file', lambda options, *_: copy.copy(options))
+    monkeypatch.setattr(scheduler, 'plan_file', lambda options, *_: copy.copy(options))
     attempts = []
-    def write(source, output, kind, settings, *_):
-        attempts.append((settings.chunk_size, settings.seed, settings.resolution))
+    def write(job, output, *_):
+        settings = job.config
+        attempts.append((settings.video.chunk_size, settings.inference.sampling.seed, settings.inference.sampling.resolution))
         assert dest.read_bytes() == b'old'
         Path(output).write_bytes(b'partial' if len(attempts) == 1 else b'complete')
         if len(attempts) == 1:
             raise torch.cuda.OutOfMemoryError('test OOM after writing')
         return 1
-    monkeypatch.setattr(cli, '_write_file_attempt', write)
-    assert cli.process_single_file(str(input_path), options, 'cpu', str(dest)) == 1
+    monkeypatch.setattr(scheduler, 'write_file_attempt', write)
+    job = scheduler.FileJob(str(input_path), str(dest), 'image', options)
+    with InferenceSession() as session:
+        assert scheduler.process_file(job, 'cpu', session, Debug(False)) == 1
     assert attempts == [(33, 42, 1080), (16, 42, 1080)]
     assert dest.read_bytes() == b'complete'
 
@@ -353,19 +367,19 @@ def test_failed_file_writer_closes_capture_and_generator(tmp_path, monkeypatch):
     cap.isOpened = lambda: True
     cap.get = lambda key: 24 if key == cv2.CAP_PROP_FPS else 10
     cap.set = lambda *_: True
-    monkeypatch.setattr(cli.cv2, 'VideoCapture', lambda _: cap)
+    monkeypatch.setattr(reader.cv2, 'VideoCapture', lambda _: cap)
     closed = []
     def stream(*unused, **unused_kwargs):
         try:
             yield torch.zeros(1, 8, 8, 3)
         finally:
             closed.append(True)
-    monkeypatch.setattr(cli, '_stream_video_chunks', stream)
+    monkeypatch.setattr(scheduler, 'stream_video_chunks', stream)
     def write(*unused, **unused_kwargs):
         raise OSError('disk full')
-    monkeypatch.setattr(cli, 'save_frames_to_video', write)
+    monkeypatch.setattr(output, 'save_frames_to_video', write)
     with pytest.raises(OSError, match='disk full'):
-        cli._write_file_attempt('input.mp4', str(tmp_path / 'out.mp4'), 'video', options, 'cpu', None)
+        scheduler.write_file_attempt(scheduler.FileJob('input.mp4', 'unused', 'video', options), str(tmp_path / 'out.mp4'), 'cpu', None, Debug(False))
     assert cap.closed and closed == [True]
 
 
@@ -386,31 +400,31 @@ def test_full_core_stream_clears_session_context_and_prepend(tmp_path, monkeypat
     session = InferenceSession(debug=debug)
     contexts = []
     def prepare(**kwargs):
-        return session.acquire(('fake',), lambda: SimpleNamespace(dit=None, vae=None)), {}
+        return session.acquire(('fake',), lambda: SimpleNamespace(dit=None, vae=None))
     def compute(ctx, images, **kwargs):
         return torch.cat((images[:2], images)), {}
     def encode(runner, ctx, images, **kwargs):
         contexts.append(ctx)
-        ctx['pixels'] = images.float().div(255)
+        ctx.input_images = images.float().div(255)
         return ctx
     def output(runner, ctx, *unused):
-        for start in range(0, len(ctx['pixels']), 2):
-            yield ctx['pixels'][start:start + 2]
-    monkeypatch.setattr(cli, 'prepare_runner', prepare)
-    monkeypatch.setattr(cli, 'load_text_embeddings', lambda *a: {})
-    monkeypatch.setattr(cli, 'compute_generation_info', compute)
-    monkeypatch.setattr(cli, 'log_generation_start', lambda *a: None)
-    monkeypatch.setattr(cli, 'encode_all_batches', encode)
-    monkeypatch.setattr(cli, 'upscale_all_batches', lambda runner, ctx, **kwargs: ctx)
-    monkeypatch.setattr(cli, 'iter_output_batches', output)
+        for start in range(0, len(ctx.input_images), 2):
+            yield ctx.input_images[start:start + 2]
+    monkeypatch.setattr(pipeline, 'prepare_runner', prepare)
+    monkeypatch.setattr(pipeline, 'load_text_embeddings', lambda *a: {})
+    monkeypatch.setattr(pipeline, 'compute_generation_info', compute)
+    monkeypatch.setattr(pipeline, 'log_generation_start', lambda *a: None)
+    monkeypatch.setattr(pipeline, 'encode_all_batches', encode)
+    monkeypatch.setattr(pipeline, 'upscale_all_batches', lambda runner, ctx, **kwargs: ctx)
+    monkeypatch.setattr(pipeline, 'iter_output_batches', output)
     raw = torch.arange(5, dtype=torch.uint8).view(5, 1, 1, 1).expand(-1, 8, 8, 3)
     for _ in range(2):
-        result = torch.cat(list(cli._iter_processed_batches(raw, options, 'cpu', debug, session)))
+        result = torch.cat(list(session.iter_batches(raw, options.inference, 'cpu', options.memory.report)))
         torch.testing.assert_close(result, raw.float() / 255)
-    assert contexts == [{}, {}]
+    assert all(ctx.input_images is None and ctx.text_embeds is None for ctx in contexts)
     assert not hasattr(session, 'ctx')
     session.close()
-    records = [json.loads(line) for line in Path(options.memory_report).read_text().splitlines()]
+    records = [json.loads(line) for line in Path(options.memory.report).read_text().splitlines()]
     assert [r['phase'] for r in records] == ['setup', 'encode', 'upscale', 'decode_postprocess_write'] * 2
     assert all(r['ok'] for r in records)
 
@@ -418,7 +432,7 @@ def test_full_core_stream_clears_session_context_and_prepend(tmp_path, monkeypat
 def test_cli_cuda_device_accepts_one_gpu_index(monkeypatch):
     monkeypatch.setattr(sys, 'argv', ['inference_cli.py', 'input.mp4', '--cuda_device', '0,1'])
     with pytest.raises(SystemExit) as error:
-        cli.parse_arguments()
+        arguments.parse_arguments()
     assert error.value.code == 2
 
 
@@ -426,7 +440,7 @@ def test_cli_limits_an_existing_visible_gpu_list_to_one_device():
     environment = dict(os.environ)
     environment['CUDA_VISIBLE_DEVICES'] = '0,1'
     result = subprocess.run(
-        [sys.executable, '-c', 'import os, inference_cli; print(os.environ["CUDA_VISIBLE_DEVICES"])',
+        [sys.executable, '-c', 'import os; from src.cli.bootstrap import configure_environment; configure_environment(1); print(os.environ["CUDA_VISIBLE_DEVICES"])',
          '--cuda_device', '1'],
         cwd=Path(__file__).resolve().parents[1], env=environment,
         capture_output=True, text=True, check=False,

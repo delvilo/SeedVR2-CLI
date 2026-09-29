@@ -23,6 +23,8 @@ Key Features:
 - Each phase handles its own cleanup in finally blocks
 """
 
+from .context import GenerationContext
+
 import os
 import sys
 import torch
@@ -127,7 +129,7 @@ def _apply_4n1_padding(video: torch.Tensor) -> torch.Tensor:
 
 
 def _reconstruct_and_transform_batch(
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     batch_idx: int,
     debug: Optional['Debug'] = None
 ) -> torch.Tensor:
@@ -142,11 +144,11 @@ def _reconstruct_and_transform_batch(
     Returns:
         Transformed video in CTHW format, ready for color correction
     """
-    start_idx, end_idx, uniform_padding = ctx['batch_metadata'][batch_idx]
+    start_idx, end_idx, uniform_padding = ctx.batch_metadata[batch_idx]
     
     # Prepare video batch
     video = _prepare_video_batch(
-        images=ctx['input_images'],
+        images=ctx.input_images,
         start_idx=start_idx,
         end_idx=end_idx,
         uniform_padding=uniform_padding,
@@ -158,12 +160,12 @@ def _reconstruct_and_transform_batch(
     video = _apply_4n1_padding(video)
     
     # Extract RGB and transform
-    if ctx.get('is_rgba', False):
+    if ctx.is_rgba:
         rgb_video = video[:, :3, :, :]
     else:
         rgb_video = video
     
-    transformed_video = ctx['video_transform'](rgb_video)
+    transformed_video = ctx.video_transform(rgb_video)
     
     del video
     
@@ -172,7 +174,7 @@ def _reconstruct_and_transform_batch(
 
 def encode_all_batches(
     runner: 'VideoDiffusionInfer',
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     images: torch.Tensor,
     debug: 'Debug',
     batch_size: int = 5,
@@ -184,7 +186,7 @@ def encode_all_batches(
     max_resolution: int = 0,
     input_noise_scale: float = 0.0,
     color_correction: str = "wavelet"
-) -> Dict[str, Any]:
+) -> GenerationContext:
     """
     Phase 1: VAE Encoding for all batches
     
@@ -209,7 +211,7 @@ def encode_all_batches(
                          Determines if transformed videos need to be stored for later use.
         
     Returns:
-        dict: Context containing:
+        GenerationContext: Invocation state containing:
             - batch_metadata: Lightweight indices for on-demand transform reconstruction
             - all_latents: List of encoded latents ready for upscaling
             - Other state for subsequent phases
@@ -233,20 +235,20 @@ def encode_all_batches(
     if images is None:
         raise ValueError("Images to encode must be provided")
     else:
-        ctx['input_images'] = images
+        ctx.input_images = images
     
     # Get total frame count from context (set in video_upscaler before encoding)
-    total_frames = ctx.get('total_frames', len(images))
+    total_frames = (ctx.total_frames if ctx.total_frames is not None else len(images))
     
     # Set it if not already set (for standalone/CLI usage)
-    if 'total_frames' not in ctx:
-        ctx['total_frames'] = total_frames
+    if ctx.total_frames is None:
+        ctx.total_frames = total_frames
     
     if total_frames == 0:
         raise ValueError("No frames to process")
     
     # Setup video transformation pipeline and compute dimensions if not already done
-    if 'true_target_dims' not in ctx:
+    if ctx.true_target_dims is None:
         sample_frame = images[0].permute(2, 0, 1).unsqueeze(0).to(torch.float32)
         setup_video_transform(ctx, resolution, max_resolution, debug, sample_frame)
         del sample_frame
@@ -254,7 +256,7 @@ def encode_all_batches(
         setup_video_transform(ctx, resolution, max_resolution, debug)
     
     # Detect if input is RGBA (4 channels)
-    ctx['is_rgba'] = images[0].shape[-1] == 4
+    ctx.is_rgba = images[0].shape[-1] == 4
     
     # Display batch optimization tip if applicable
     if total_frames > 0:
@@ -273,7 +275,7 @@ def encode_all_batches(
         debug.log(f"temporal_overlap >= batch_size, resetting to 0", level="WARNING", category="setup", force=True)
     
     # Store actual temporal overlap used (may differ from parameter if reset)
-    ctx['actual_temporal_overlap'] = temporal_overlap
+    ctx.actual_temporal_overlap = temporal_overlap
     
     # Calculate number of batches
     num_encode_batches = 0
@@ -284,17 +286,17 @@ def encode_all_batches(
         num_encode_batches += 1
     
     # Pre-allocate lists for memory efficiency
-    ctx['all_latents'] = [None] * num_encode_batches
-    ctx['all_ori_lengths'] = [None] * num_encode_batches
+    ctx.all_latents = [None] * num_encode_batches
+    ctx.all_ori_lengths = [None] * num_encode_batches
     if color_correction != "none":
-        ctx['batch_metadata'] = [None] * num_encode_batches
+        ctx.batch_metadata = [None] * num_encode_batches
     
     encode_idx = 0
     
     try:
         # Materialize VAE if still on meta device
         if runner.vae and next(runner.vae.parameters()).device.type == 'meta':
-            materialize_model(runner, "vae", ctx['vae_device'], runner.config, debug)
+            materialize_model(runner, "vae", ctx.vae_device, runner.config, debug)
         else:
             # Model already materialized (cached) - apply any pending configs if needed
             if getattr(runner, '_vae_config_needs_application', False):
@@ -312,7 +314,7 @@ def encode_all_batches(
         debug.log(f"Using seed: {seed_vae} (VAE uses seed+1000000 for deterministic sampling)", category="vae")
         
         # Move VAE to GPU for encoding (no-op if already there)
-        manage_model_device(model=runner.vae, target_device=ctx['vae_device'], 
+        manage_model_device(model=runner.vae, target_device=ctx.vae_device,
                           model_name="VAE", debug=debug, runner=runner)
         
         debug.log_memory_state("After VAE loading for encoding", detailed_tensors=False)
@@ -359,9 +361,9 @@ def encode_all_batches(
             
             video = manage_tensor(
                 tensor=video,
-                target_device=ctx['vae_device'],
+                target_device=ctx.vae_device,
                 tensor_name=f"video_batch_{encode_idx+1}",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="VAE encoding",
                 indent_level=1
@@ -384,13 +386,13 @@ def encode_all_batches(
                 video = _apply_4n1_padding(video)
 
             # Apply transformations (matches reconstruction logic)
-            if ctx.get('is_rgba', False):
+            if ctx.is_rgba:
                 debug.log(f"Extracted Alpha channel for edge-guided upscaling", category="alpha", indent_level=1)
                 rgb_video = video[:, :3, :, :]
             else:
                 rgb_video = video
 
-            transformed_video = ctx['video_transform'](rgb_video)
+            transformed_video = ctx.video_transform(rgb_video)
 
             # Apply input noise if requested (to reduce artifacts at high resolutions)
             if input_noise_scale > 0:
@@ -411,44 +413,44 @@ def encode_all_batches(
                 del noise
 
             # Store original length for proper trimming later
-            ctx['all_ori_lengths'][encode_idx] = ori_length
+            ctx.all_ori_lengths[encode_idx] = ori_length
 
             # Store batch frame indices for on-demand reconstruction
             if color_correction != "none":
-                ctx['batch_metadata'][encode_idx] = (start_idx, end_idx, batch_size - ori_length if is_uniform_padding else 0)
+                ctx.batch_metadata[encode_idx] = (start_idx, end_idx, batch_size - ori_length if is_uniform_padding else 0)
             
             # Extract and store Alpha and RGB from padded original video (before encoding)
-            if ctx.get('is_rgba', False):
-                if 'all_alpha_channels' not in ctx:
-                    ctx['all_alpha_channels'] = [None] * num_encode_batches
-                if 'all_input_rgb' not in ctx:
-                    ctx['all_input_rgb'] = [None] * num_encode_batches
+            if ctx.is_rgba:
+                if ctx.all_alpha_channels is None:
+                    ctx.all_alpha_channels = [None] * num_encode_batches
+                if ctx.all_input_rgb is None:
+                    ctx.all_input_rgb = [None] * num_encode_batches
                 
                 # Extract from padded RGBA video (format: T, 4, H, W)
                 alpha_channel = video[:, 3:4, :, :]
                 rgb_video_original = video[:, :3, :, :]
                 
                 # Store on tensor_offload_device to save VRAM (or keep on device if none)
-                if ctx['tensor_offload_device'] is not None:
-                    ctx['all_alpha_channels'][encode_idx] = manage_tensor(
+                if ctx.tensor_offload_device is not None:
+                    ctx.all_alpha_channels[encode_idx] = manage_tensor(
                         tensor=alpha_channel,
-                        target_device=ctx['tensor_offload_device'],
+                        target_device=ctx.tensor_offload_device,
                         tensor_name=f"alpha_channel_{encode_idx+1}",
                         debug=debug,
                         reason="storing Alpha channel for upscaling",
                         indent_level=1
                     )
-                    ctx['all_input_rgb'][encode_idx] = manage_tensor(
+                    ctx.all_input_rgb[encode_idx] = manage_tensor(
                         tensor=rgb_video_original,
-                        target_device=ctx['tensor_offload_device'],
+                        target_device=ctx.tensor_offload_device,
                         tensor_name=f"rgb_original_{encode_idx+1}",
                         debug=debug,
                         reason="storing RGB edge guidance for Alpha upscaling",
                         indent_level=1
                     )
                 else:
-                    ctx['all_alpha_channels'][encode_idx] = alpha_channel
-                    ctx['all_input_rgb'][encode_idx] = rgb_video_original
+                    ctx.all_alpha_channels[encode_idx] = alpha_channel
+                    ctx.all_input_rgb[encode_idx] = rgb_video_original
                 
                 del alpha_channel, rgb_video_original
 
@@ -457,9 +459,9 @@ def encode_all_batches(
             # Move to VAE device with correct dtype for encoding
             transformed_video = manage_tensor(
                 tensor=transformed_video,
-                target_device=ctx['vae_device'],
+                target_device=ctx.vae_device,
                 tensor_name=f"transformed_video_{encode_idx+1}",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="VAE encoding",
                 indent_level=1
@@ -472,23 +474,23 @@ def encode_all_batches(
             del transformed_video, rgb_video
             
             # Convert from VAE dtype to compute dtype and offload to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None and cond_latents[0].is_cuda:
-                ctx['all_latents'][encode_idx] = manage_tensor(
+            if ctx.tensor_offload_device is not None and cond_latents[0].is_cuda:
+                ctx.all_latents[encode_idx] = manage_tensor(
                     tensor=cond_latents[0],
-                    target_device=ctx['tensor_offload_device'],
+                    target_device=ctx.tensor_offload_device,
                     tensor_name=f"latent_{encode_idx+1}",
-                    dtype=ctx['compute_dtype'],
+                    dtype=ctx.compute_dtype,
                     debug=debug,
                     reason="storing encoded latents for upscaling",
                     indent_level=1
                 )
             else:
                 # Stay on current device but convert to compute dtype
-                ctx['all_latents'][encode_idx] = manage_tensor(
+                ctx.all_latents[encode_idx] = manage_tensor(
                     tensor=cond_latents[0],
                     target_device=cond_latents[0].device,
                     tensor_name=f"latent_{encode_idx+1}",
-                    dtype=ctx['compute_dtype'],
+                    dtype=ctx.compute_dtype,
                     debug=debug,
                     reason="VAE dtype → compute dtype",
                     indent_level=1
@@ -511,8 +513,8 @@ def encode_all_batches(
         # Offload VAE to configured offload device if specified
         if sys.exception() is not None:
             cleanup_vae(runner, debug, cache_model=False)
-        elif ctx['vae_offload_device'] is not None:
-            manage_model_device(model=runner.vae, target_device=ctx['vae_offload_device'], 
+        elif ctx.vae_offload_device is not None:
+            manage_model_device(model=runner.vae, target_device=ctx.vae_offload_device,
                                 model_name="VAE", debug=debug, reason="VAE offload", runner=runner)
     
     debug.end_timer("phase1_encoding", "Phase 1: VAE encoding complete", show_breakdown=True)
@@ -523,13 +525,13 @@ def encode_all_batches(
 
 def upscale_all_batches(
     runner: 'VideoDiffusionInfer',
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     debug: 'Debug',
     progress_callback: Optional[Callable[[int, int, int, str], None]] = None,
     seed: int = 42,
     latent_noise_scale: float = 0.0,
     cache_model: bool = False
-) -> Dict[str, Any]:
+) -> GenerationContext:
     """
     Phase 2: DiT Upscaling for all encoded batches.
     
@@ -549,7 +551,7 @@ def upscale_all_batches(
         cache_model: If True, keep DiT model for reuse instead of deleting it
         
     Returns:
-        dict: Updated context containing:
+        GenerationContext: Updated invocation state containing:
             - all_upscaled_latents: List of upscaled latents ready for decoding
             - Preserved state from encoding phase
             
@@ -564,7 +566,7 @@ def upscale_all_batches(
         raise ValueError("Context is required for upscale_all_batches. Run encode_all_batches first.")
         
     # Validate we have encoded latents
-    if 'all_latents' not in ctx or not ctx['all_latents']:
+    if ctx.all_latents is None or not ctx.all_latents:
         raise ValueError("No encoded latents found. Run encode_all_batches first.")
     
     debug.log("", category="none", force=True)
@@ -572,8 +574,8 @@ def upscale_all_batches(
     debug.start_timer("phase2_upscaling")
     
     # Load text embeddings if not already loaded
-    if ctx.get('text_embeds') is None:
-        ctx['text_embeds'] = load_text_embeddings(script_directory, ctx['dit_device'], ctx['compute_dtype'], debug)
+    if ctx.text_embeds is None:
+        ctx.text_embeds = load_text_embeddings(script_directory, ctx.dit_device, ctx.compute_dtype, debug)
         debug.log("Loaded text embeddings for DiT", category="dit")
     
     # Configure diffusion parameters
@@ -581,26 +583,26 @@ def upscale_all_batches(
     runner.config.diffusion.cfg.scale = 1.0
     runner.config.diffusion.cfg.rescale = 0.0
     runner.config.diffusion.timesteps.sampling.steps = 1
-    runner.configure_diffusion(device=ctx['dit_device'], dtype=ctx['compute_dtype'])
+    runner.configure_diffusion(device=ctx.dit_device, dtype=ctx.compute_dtype)
 
     # Count valid latents
-    num_valid_latents = len([l for l in ctx['all_latents'] if l is not None])
+    num_valid_latents = len([l for l in ctx.all_latents if l is not None])
 
     # Safety check for empty latents
     if num_valid_latents == 0:
         debug.log("No valid latents to upscale", level="WARNING", category="dit", force=True)
-        ctx['all_upscaled_latents'] = []
+        ctx.all_upscaled_latents = []
         return ctx
     
     # Pre-allocate list for upscaled latents
-    ctx['all_upscaled_latents'] = [None] * num_valid_latents
+    ctx.all_upscaled_latents = [None] * num_valid_latents
     
     upscale_idx = 0
     
     try:
         # Materialize DiT if still on meta device
         if runner.dit and next(runner.dit.parameters()).device.type == 'meta':
-            materialize_model(runner, "dit", ctx['dit_device'], runner.config, debug)
+            materialize_model(runner, "dit", ctx.dit_device, runner.config, debug)
         else:
             # Model already materialized (cached) - apply any pending configs if needed
             if getattr(runner, '_dit_config_needs_application', False):
@@ -611,12 +613,12 @@ def upscale_all_batches(
         ensure_precision_initialized(ctx, runner, debug)
 
         # Move DiT to GPU for upscaling (no-op if already there)
-        manage_model_device(model=runner.dit, target_device=ctx['dit_device'], 
+        manage_model_device(model=runner.dit, target_device=ctx.dit_device,
                             model_name="DiT", debug=debug, runner=runner)
 
         debug.log_memory_state("After DiT loading for upscaling", detailed_tensors=False)
 
-        for batch_idx, latent in enumerate(ctx['all_latents']):
+        for batch_idx, latent in enumerate(ctx.all_latents):
             if latent is None:
                 continue
             
@@ -632,16 +634,16 @@ def upscale_all_batches(
             # Move to DiT device with correct dtype for upscaling (no-op if already there)
             latent = manage_tensor(
                 tensor=latent,
-                target_device=ctx['dit_device'],
+                target_device=ctx.dit_device,
                 tensor_name=f"latent_{upscale_idx+1}",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="DiT upscaling",
                 indent_level=1
             )
 
             # Generate noise (randn_like automatically uses latent's device)
-            base_noise = torch.randn_like(latent, dtype=ctx['compute_dtype'])
+            base_noise = torch.randn_like(latent, dtype=ctx.compute_dtype)
             
             noises = [base_noise]
             aug_noises = [base_noise * 0.1 + torch.randn_like(base_noise) * 0.05]
@@ -653,8 +655,8 @@ def upscale_all_batches(
             def _add_noise(x, aug_noise):
                 if latent_noise_scale == 0.0:
                     return x
-                t = torch.tensor([1000.0], device=ctx['dit_device'], dtype=ctx['compute_dtype']) * latent_noise_scale
-                shape = torch.tensor(x.shape[1:], device=ctx['dit_device'])[None]
+                t = torch.tensor([1000.0], device=ctx.dit_device, dtype=ctx.compute_dtype) * latent_noise_scale
+                shape = torch.tensor(x.shape[1:], device=ctx.dit_device)[None]
                 t = runner.timestep_transform(t, shape)
                 x = runner.schedule.forward(x, aug_noise, t)
                 del t, shape
@@ -673,42 +675,42 @@ def upscale_all_batches(
             try:
                 dit_dtype = next(dit_model.parameters()).dtype
             except StopIteration:
-                dit_dtype = ctx['compute_dtype']  # Fallback for meta device or empty model
+                dit_dtype = ctx.compute_dtype  # Fallback for meta device or empty model
             
             # Use autocast if DiT dtype differs from compute dtype
             debug.start_timer(f"dit_inference_{upscale_idx+1}")
             with torch.no_grad():
-                if dit_dtype != ctx['compute_dtype']:
-                    with torch.autocast(ctx['dit_device'].type, ctx['compute_dtype'], enabled=True):
+                if dit_dtype != ctx.compute_dtype:
+                    with torch.autocast(ctx.dit_device.type, ctx.compute_dtype, enabled=True):
                         upscaled_latents = runner.inference(
                             noises=noises,
                             conditions=conditions,
-                            **ctx['text_embeds'],
+                            **ctx.text_embeds,
                         )
                 else:
                     upscaled_latents = runner.inference(
                         noises=noises,
                         conditions=conditions,
-                        **ctx['text_embeds'],
+                        **ctx.text_embeds,
                     )
             debug.end_timer(f"dit_inference_{upscale_idx+1}", f"DiT inference {upscale_idx+1}")
             
             # Offload upscaled latents to avoid VRAM accumulation
-            if ctx['tensor_offload_device'] is not None and upscaled_latents[0].is_cuda:
-                ctx['all_upscaled_latents'][upscale_idx] = manage_tensor(
+            if ctx.tensor_offload_device is not None and upscaled_latents[0].is_cuda:
+                ctx.all_upscaled_latents[upscale_idx] = manage_tensor(
                     tensor=upscaled_latents[0],
-                    target_device=ctx['tensor_offload_device'],
+                    target_device=ctx.tensor_offload_device,
                     tensor_name=f"upscaled_latent_{upscale_idx+1}",
                     debug=debug,
                     reason="storing upscaled latents for decoding",
                     indent_level=1
                 )
             else:
-                ctx['all_upscaled_latents'][upscale_idx] = upscaled_latents[0]
+                ctx.all_upscaled_latents[upscale_idx] = upscaled_latents[0]
             
             # Free original latent - release tensor memory first
-            release_tensor_memory(ctx['all_latents'][batch_idx])
-            ctx['all_latents'][batch_idx] = None
+            release_tensor_memory(ctx.all_latents[batch_idx])
+            ctx.all_latents[batch_idx] = None
             
             del noises, aug_noises, latent, conditions, condition, base_noise, upscaled_latents
             
@@ -769,11 +771,11 @@ def upscale_all_batches(
 
 def decode_all_batches(
     runner: 'VideoDiffusionInfer',
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     debug: 'Debug',
     progress_callback: Optional[Callable[[int, int, int, str], None]] = None,
     cache_model: bool = False
-) -> Dict[str, Any]:
+) -> GenerationContext:
     """
     Phase 3: VAE Decoding.
     
@@ -791,7 +793,7 @@ def decode_all_batches(
         cache_model: If True, keep VAE model for reuse instead of deleting it
         
     Returns:
-        dict: Updated context containing:
+        GenerationContext: Updated invocation state containing:
             - final_video: Pre-allocated tensor with decoded samples (unnormalized, in [-1,1])
             - decode_batch_info: List of (start_idx, end_idx, ori_length) for Phase 4 processing
             - VAE cleanup completed
@@ -807,7 +809,7 @@ def decode_all_batches(
         raise ValueError("Context is required for decode_all_batches. Run upscale_all_batches first.")
     
     # Validate we have upscaled latents
-    if 'all_upscaled_latents' not in ctx or not ctx['all_upscaled_latents']:
+    if ctx.all_upscaled_latents is None or not ctx.all_upscaled_latents:
         raise ValueError("No upscaled latents found. Run upscale_all_batches first.")
     
     debug.log("", category="none", force=True)
@@ -815,32 +817,32 @@ def decode_all_batches(
     debug.start_timer("phase3_decoding")
 
     # Count valid latents
-    num_valid_latents = len([l for l in ctx['all_upscaled_latents'] if l is not None])
-    num_batches = len([l for l in ctx['all_ori_lengths'] if l is not None])
+    num_valid_latents = len([l for l in ctx.all_upscaled_latents if l is not None])
+    num_batches = len([l for l in ctx.all_ori_lengths if l is not None])
     
     # Get output dimensions from context (set during Phase 1)
-    if 'true_target_dims' not in ctx:
+    if ctx.true_target_dims is None:
         raise ValueError("true_target_dims not found in context. Run encode_all_batches first.")
-    true_h, true_w = ctx['true_target_dims']
-    total_frames = ctx.get('total_frames', 0)
-    C = 4 if ctx.get('is_rgba', False) else 3
+    true_h, true_w = ctx.true_target_dims
+    total_frames = (ctx.total_frames if ctx.total_frames is not None else 0)
+    C = 4 if ctx.is_rgba else 3
     
     # Pre-allocate final_video at the START of decode phase (before any batch processing)
     # This ensures we only need memory for final_video + 1 batch, not final_video + all batch_samples
-    target_device = ctx['tensor_offload_device'] or 'cpu'
+    target_device = ctx.tensor_offload_device or 'cpu'
     channels_str = "RGBA" if C == 4 else "RGB"
     required_gb = (total_frames * true_h * true_w * C * 2) / (1024**3)
     debug.log(f"Pre-allocating output tensor: {total_frames} frames, {true_w}x{true_h}px, {channels_str} ({required_gb:.2f}GB)", 
               category="setup", force=True)
     
-    ctx['final_video'] = torch.empty((total_frames, true_h, true_w, C), dtype=ctx['compute_dtype'], device=target_device)
+    ctx.final_video = torch.empty((total_frames, true_h, true_w, C), dtype=ctx.compute_dtype, device=target_device)
     
     # Track batch write positions for Phase 4 processing
     # Each entry: (write_start, write_end, batch_idx, ori_length)
-    ctx['decode_batch_info'] = []
+    ctx.decode_batch_info = []
     
     # Get temporal overlap from context (set during Phase 1)
-    temporal_overlap = ctx.get('actual_temporal_overlap', 0)
+    temporal_overlap = (ctx.actual_temporal_overlap if ctx.actual_temporal_overlap is not None else 0)
     
     # Track padding removed for final summary
     total_padding_removed = 0
@@ -851,13 +853,13 @@ def decode_all_batches(
     try:
         # VAE should already be materialized from encoding phase
         if runner.vae and next(runner.vae.parameters()).device.type == 'meta':
-            materialize_model(runner, "vae", ctx['vae_device'], runner.config, debug)
+            materialize_model(runner, "vae", ctx.vae_device, runner.config, debug)
 
         # Precision should already be initialized from encoding phase
         ensure_precision_initialized(ctx, runner, debug)
 
         # Move VAE to GPU for decoding (no-op if already there)
-        manage_model_device(model=runner.vae, target_device=ctx['vae_device'], 
+        manage_model_device(model=runner.vae, target_device=ctx.vae_device,
                           model_name="VAE", debug=debug, runner=runner)
         
         debug.log_memory_state("After VAE loading for decoding", detailed_tensors=False)
@@ -869,7 +871,7 @@ def decode_all_batches(
             debug.log("Remember to disable --tile_debug in production to remove overlay visualization", category="tip", indent_level=1, force=True)
         
         # Process decoding
-        for batch_idx, upscaled_latent in enumerate(ctx['all_upscaled_latents']):
+        for batch_idx, upscaled_latent in enumerate(ctx.all_upscaled_latents):
             if upscaled_latent is None:
                 continue
             
@@ -880,9 +882,9 @@ def decode_all_batches(
             # Move to VAE device with correct dtype for decoding (no-op if already there)
             upscaled_latent = manage_tensor(
                 tensor=upscaled_latent,
-                target_device=ctx['vae_device'],
+                target_device=ctx.vae_device,
                 tensor_name=f"upscaled_latent_{decode_idx+1}",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="VAE decoding",
                 indent_level=1
@@ -903,7 +905,7 @@ def decode_all_batches(
             del samples
             
             # Get original length for this batch (before any padding was added)
-            ori_length = ctx['all_ori_lengths'][decode_idx] if decode_idx < len(ctx['all_ori_lengths']) else sample.shape[0]
+            ori_length = ctx.all_ori_lengths[decode_idx] if decode_idx < len(ctx.all_ori_lengths) else sample.shape[0]
             
             # Trim temporal padding: sample is in [T, C, H, W] format after rearrange
             if ori_length < sample.shape[0]:
@@ -934,7 +936,7 @@ def decode_all_batches(
                 # Subsequent batches with overlap: blend overlapping region
                 if temporal_overlap < batch_frames and current_write_idx >= temporal_overlap:
                     # Blend overlapping region in-place on final_video
-                    prev_tail = ctx['final_video'][current_write_idx - temporal_overlap:current_write_idx]
+                    prev_tail = ctx.final_video[current_write_idx - temporal_overlap:current_write_idx]
                     cur_head = sample[:temporal_overlap]
                     
                     # Move to same device for blending if needed
@@ -942,7 +944,7 @@ def decode_all_batches(
                         cur_head = cur_head.to(prev_tail.device)
                     
                     blended = blend_overlapping_frames(prev_tail, cur_head, temporal_overlap)
-                    ctx['final_video'][current_write_idx - temporal_overlap:current_write_idx] = blended
+                    ctx.final_video[current_write_idx - temporal_overlap:current_write_idx] = blended
                     
                     debug.log(f"Blended {temporal_overlap} overlapping frames at positions {current_write_idx - temporal_overlap}-{current_write_idx}", 
                              category="video", indent_level=1)
@@ -960,28 +962,28 @@ def decode_all_batches(
                 tensor=sample,
                 target_device=target_device,
                 tensor_name=f"sample_{decode_idx+1}",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="writing to final_video",
                 indent_level=1
             )
             
             # Write to final_video - for RGBA, write only RGB channels (VAE outputs 3 channels)
-            if ctx.get('is_rgba', False):
-                ctx['final_video'][write_start:write_end, :, :, :3] = sample
+            if ctx.is_rgba:
+                ctx.final_video[write_start:write_end, :, :, :3] = sample
             else:
-                ctx['final_video'][write_start:write_end] = sample
+                ctx.final_video[write_start:write_end] = sample
             
             # Store batch info for Phase 4 processing
-            ctx['decode_batch_info'].append((write_start, write_end, decode_idx, ori_length))
+            ctx.decode_batch_info.append((write_start, write_end, decode_idx, ori_length))
             current_write_idx = write_end
             
             debug.log(f"Wrote {batch_frames} frames to positions {write_start}-{write_end}", 
                      category="video", indent_level=1)
             
             # Free memory immediately - no batch_samples storage
-            release_tensor_memory(ctx['all_upscaled_latents'][batch_idx])
-            ctx['all_upscaled_latents'][batch_idx] = None
+            release_tensor_memory(ctx.all_upscaled_latents[batch_idx])
+            ctx.all_upscaled_latents[batch_idx] = None
             del upscaled_latent, sample
             
             debug.end_timer(f"decode_batch_{decode_idx+1}", f"Decoded batch {decode_idx+1}")
@@ -993,7 +995,7 @@ def decode_all_batches(
             decode_idx += 1
         
         # Store padding stats for Phase 4 final summary
-        ctx['total_padding_removed'] = total_padding_removed
+        ctx.total_padding_removed = total_padding_removed
             
     except Exception as e:
         debug.log(f"Error in Phase 3 (Decoding): {e}", level="ERROR", category="error", force=True)
@@ -1003,9 +1005,9 @@ def decode_all_batches(
         cleanup_vae(runner=runner, debug=debug, cache_model=cache_model)
         
         # Clean up upscaled latents storage
-        if 'all_upscaled_latents' in ctx:
-            release_tensor_collection(ctx['all_upscaled_latents'])
-            del ctx['all_upscaled_latents']
+        if ctx.all_upscaled_latents is not None:
+            release_tensor_collection(ctx.all_upscaled_latents)
+            ctx.all_upscaled_latents = None
         
     debug.end_timer("phase3_decoding", "Phase 3: VAE decoding complete", show_breakdown=True)
     debug.log_memory_state("After phase 3 (VAE decoding)", show_tensors=False)
@@ -1014,7 +1016,7 @@ def decode_all_batches(
 
 
 def postprocess_all_batches(
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     debug: 'Debug',
     progress_callback: Optional[Callable[[int, int, int, str], None]] = None,
     color_correction: str = "wavelet",
@@ -1022,7 +1024,7 @@ def postprocess_all_batches(
     temporal_overlap: int = 0,
     batch_size: int = 5,
     cleanup: bool = True
-) -> Dict[str, Any]:
+) -> GenerationContext:
     """
     Phase 4: Post-processing and Final Assembly.
     
@@ -1040,7 +1042,7 @@ def postprocess_all_batches(
         batch_size: Frames per batch used during encoding for overlap calculation (default: 5)
         
     Returns:
-        dict: Updated context containing:
+        GenerationContext: Updated invocation state containing:
             - final_video: Assembled video tensor [T, H, W, C] range [0,1] with overlap blended and prepended frames removed
             - All intermediate storage cleared for memory efficiency
             
@@ -1054,11 +1056,11 @@ def postprocess_all_batches(
         raise ValueError("Context is required for postprocess_all_batches. Run decode_all_batches first.")
     
     # Validate we have final_video (pre-allocated in decode_all_batches)
-    if 'final_video' not in ctx or ctx['final_video'] is None:
+    if ctx.final_video is None:
         raise ValueError("final_video not found. Run decode_all_batches first.")
     
     # Validate we have batch info for processing
-    if 'decode_batch_info' not in ctx or not ctx['decode_batch_info']:
+    if ctx.decode_batch_info is None or not ctx.decode_batch_info:
         raise ValueError("decode_batch_info not found. Run decode_all_batches first.")
     
     debug.log("", category="none", force=True)
@@ -1066,25 +1068,25 @@ def postprocess_all_batches(
     debug.start_timer("phase4_postprocessing")
     
     # Total_frames represents the original input frame count (set in Phase 1)
-    total_frames = ctx.get('total_frames', 0)
+    total_frames = (ctx.total_frames if ctx.total_frames is not None else 0)
     
     # Early exit if no frames to process
     if total_frames == 0:
-        ctx['final_video'] = torch.empty((0, 0, 0, 0), dtype=ctx['compute_dtype'])
+        ctx.final_video = torch.empty((0, 0, 0, 0), dtype=ctx.compute_dtype)
         debug.log("No frames to process", level="WARNING", category="generation", force=True)
         return ctx
     
     # Get batch info from decode phase
-    batch_info_list = ctx['decode_batch_info']
+    batch_info_list = ctx.decode_batch_info
     num_valid_samples = len(batch_info_list)
     
     # Calculate total post-processing work units
     # For RGBA: each batch needs 2 steps (alpha processing + color correction/assembly)
     # For RGB: each batch needs 1 step (color correction/assembly only)
-    has_alpha_processing = (ctx.get('is_rgba', False) and 
-                           'all_alpha_channels' in ctx and 
-                           'all_input_rgb' in ctx and
-                           isinstance(ctx.get('all_alpha_channels'), list))
+    has_alpha_processing = (ctx.is_rgba and
+                           ctx.all_alpha_channels is not None and
+                           ctx.all_input_rgb is not None and
+                           isinstance(ctx.all_alpha_channels, list))
     
     if has_alpha_processing:
         total_postprocessing_steps = num_valid_samples * 2  # Alpha + main processing
@@ -1094,7 +1096,7 @@ def postprocess_all_batches(
     current_postprocessing_step = 0
     
     # Get padding stats from Phase 3
-    total_padding_removed = ctx.get('total_padding_removed', 0)
+    total_padding_removed = (ctx.total_padding_removed if ctx.total_padding_removed is not None else 0)
     
     # Alpha processing - handle RGBA inputs with edge-guided upscaling
     # Process alpha on final_video slices in-place
@@ -1102,17 +1104,17 @@ def postprocess_all_batches(
         debug.log("Processing Alpha channel with edge-guided upscaling...", category="alpha")
         
         # Validate alpha channel data exists
-        if not isinstance(ctx.get('all_alpha_channels'), list) or not isinstance(ctx.get('all_input_rgb'), list):
+        if not isinstance(ctx.all_alpha_channels, list) or not isinstance(ctx.all_input_rgb, list):
             debug.log("WARNING: Alpha channel data malformed, skipping alpha processing", 
                      level="WARNING", category="alpha", force=True)
         else:
             for write_start, write_end, batch_idx, ori_length in batch_info_list:
                 # Bounds checking for alpha channel lists
-                if batch_idx >= len(ctx['all_alpha_channels']) or ctx['all_alpha_channels'][batch_idx] is None:
+                if batch_idx >= len(ctx.all_alpha_channels) or ctx.all_alpha_channels[batch_idx] is None:
                     continue
                     
                 # Validate alpha channel tensor integrity
-                if not isinstance(ctx['all_alpha_channels'][batch_idx], torch.Tensor):
+                if not isinstance(ctx.all_alpha_channels[batch_idx], torch.Tensor):
                     debug.log(f"WARNING: Alpha channel {batch_idx} is not a tensor, skipping", 
                              level="WARNING", category="alpha", force=True)
                     continue
@@ -1122,16 +1124,16 @@ def postprocess_all_batches(
 
                 # Get RGB slice from final_video for alpha processing
                 # final_video is [T, H, W, C], process_alpha_for_batch expects list of [T, C, H, W]
-                rgb_slice = ctx['final_video'][write_start:write_end, :, :, :3]  # Only RGB
+                rgb_slice = ctx.final_video[write_start:write_end, :, :, :3]  # Only RGB
                 rgb_tchw = rgb_slice.permute(0, 3, 1, 2)  # [T, H, W, 3] → [T, 3, H, W]
                 
                 # Process Alpha and merge with RGB
                 processed_samples = process_alpha_for_batch(
                     rgb_samples=[rgb_tchw],
-                    alpha_original=ctx['all_alpha_channels'][batch_idx],
-                    rgb_original=ctx['all_input_rgb'][batch_idx],
-                    device=ctx.get('postprocess_device', ctx['vae_device']),
-                    compute_dtype=ctx['compute_dtype'],
+                    alpha_original=ctx.all_alpha_channels[batch_idx],
+                    rgb_original=ctx.all_input_rgb[batch_idx],
+                    device=(ctx.postprocess_device or ctx.vae_device),
+                    compute_dtype=ctx.compute_dtype,
                     debug=debug
                 )
                 
@@ -1143,25 +1145,25 @@ def postprocess_all_batches(
                 
                 alpha_thwc = manage_tensor(
                     tensor=alpha_thwc,
-                    target_device=ctx['final_video'].device,
+                    target_device=ctx.final_video.device,
                     tensor_name=f"alpha_channel_{batch_idx+1}",
-                    dtype=ctx['compute_dtype'],
+                    dtype=ctx.compute_dtype,
                     debug=debug,
                     reason="writing alpha channel to final_video",
                     indent_level=1
                 )
                 
                 # Write only the alpha channel to the 4th channel slot
-                ctx['final_video'][write_start:write_end, :, :, 3:4] = alpha_thwc
+                ctx.final_video[write_start:write_end, :, :, 3:4] = alpha_thwc
                 
                 del rgb_slice, rgb_tchw, processed_samples, processed_rgba, alpha_channel, alpha_thwc
                 
                 # Free memory immediately
-                release_tensor_memory(ctx['all_alpha_channels'][batch_idx])
-                ctx['all_alpha_channels'][batch_idx] = None
+                release_tensor_memory(ctx.all_alpha_channels[batch_idx])
+                ctx.all_alpha_channels[batch_idx] = None
 
-                release_tensor_memory(ctx['all_input_rgb'][batch_idx])
-                ctx['all_input_rgb'][batch_idx] = None
+                release_tensor_memory(ctx.all_input_rgb[batch_idx])
+                ctx.all_input_rgb[batch_idx] = None
             
                 debug.end_timer(f"alpha_batch_{batch_idx+1}", f"Alpha batch {batch_idx+1}")
                 
@@ -1181,11 +1183,11 @@ def postprocess_all_batches(
             debug.start_timer(f"postprocess_batch_{info_idx+1}")
             
             # Get slice from final_video - currently in [T, H, W, C] format, values in [-1, 1]
-            sample_thwc = ctx['final_video'][write_start:write_end]
+            sample_thwc = ctx.final_video[write_start:write_end]
             
             # For RGBA, we only process RGB channels for color correction
             # Alpha was already written during alpha processing above
-            if ctx.get('is_rgba', False) and sample_thwc.shape[-1] == 4:
+            if ctx.is_rgba and sample_thwc.shape[-1] == 4:
                 sample_thwc_rgb = sample_thwc[..., :3]  # [T, H, W, 3]
                 sample = sample_thwc_rgb.permute(0, 3, 1, 2)  # [T, H, W, 3] → [T, 3, H, W]
             else:
@@ -1194,9 +1196,9 @@ def postprocess_all_batches(
             # Move to VAE device for processing
             sample = manage_tensor(
                 tensor=sample,
-                target_device=ctx.get('postprocess_device', ctx['vae_device']) if color_correction != "none" else sample.device,
+                target_device=(ctx.postprocess_device or ctx.vae_device) if color_correction != "none" else sample.device,
                 tensor_name=f"sample_{info_idx+1}",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="post-processing",
                 indent_level=1
@@ -1204,8 +1206,8 @@ def postprocess_all_batches(
             
             # Reconstruct transformed video on-demand for color correction
             input_video = None
-            if color_correction != "none" and ctx.get('batch_metadata') is not None:
-                if batch_idx < len(ctx['batch_metadata']) and ctx['batch_metadata'][batch_idx] is not None:
+            if color_correction != "none" and ctx.batch_metadata is not None:
+                if batch_idx < len(ctx.batch_metadata) and ctx.batch_metadata[batch_idx] is not None:
                     # Reconstruct transformation
                     transformed_video = _reconstruct_and_transform_batch(ctx, batch_idx, debug)
                     input_video = optimized_single_video_rearrange(transformed_video)
@@ -1213,8 +1215,8 @@ def postprocess_all_batches(
                     
                     # For batches after the first with temporal overlap, the overlap frames
                     # were blended in Phase 3 and are not part of this slice. Skip them.
-                    actual_overlap = ctx.get('actual_temporal_overlap', 0)
-                    skip_head = ctx.get("postprocess_skip_head", actual_overlap if batch_idx > 0 else 0)
+                    actual_overlap = (ctx.actual_temporal_overlap if ctx.actual_temporal_overlap is not None else 0)
+                    skip_head = (ctx.postprocess_skip_head if ctx.postprocess_skip_head is not None else actual_overlap if batch_idx > 0 else 0)
                     if skip_head:
                         input_video = input_video[skip_head:]
                     
@@ -1223,15 +1225,15 @@ def postprocess_all_batches(
                         input_video = input_video[:sample.shape[0]]
                     
                     # Trim spatial dimensions to true target size
-                    if 'true_target_dims' in ctx:
-                        true_h, true_w = ctx['true_target_dims']
+                    if ctx.true_target_dims is not None:
+                        true_h, true_w = ctx.true_target_dims
                         if input_video.shape[-2] != true_h or input_video.shape[-1] != true_w:
                             input_video = input_video[:, :, :true_h, :true_w]
             
             # Apply color correction if enabled (RGB only)
             if color_correction != "none" and input_video is not None:
                 # Check if RGBA (samples are in T, C, H, W format at this point)
-                has_alpha = ctx.get('is_rgba', False)
+                has_alpha = ctx.is_rgba
                 alpha_channel = None
                 
                 if has_alpha:
@@ -1290,7 +1292,7 @@ def postprocess_all_batches(
             sample = optimized_sample_to_image_format(sample)
             
             # Apply normalization only to RGB channels, preserve Alpha as-is
-            if ctx.get('is_rgba', False) and sample.shape[-1] == 4:
+            if ctx.is_rgba and sample.shape[-1] == 4:
                 # Split RGBA: sample is (T, H, W, C) format after optimized_sample_to_image_format
                 rgb_channels = sample[..., :3]  # (T, H, W, 3)
                 alpha_channel = sample[..., 3:4]  # (T, H, W, 1)
@@ -1314,9 +1316,9 @@ def postprocess_all_batches(
             # Move to final_video device and write back in-place
             sample = manage_tensor(
                 tensor=sample,
-                target_device=ctx['final_video'].device,
+                target_device=ctx.final_video.device,
                 tensor_name=f"sample_{info_idx+1}_final",
-                dtype=ctx['compute_dtype'],
+                dtype=ctx.compute_dtype,
                 debug=debug,
                 reason="writing processed result to final_video",
                 indent_level=1
@@ -1324,10 +1326,10 @@ def postprocess_all_batches(
             
             # Write back to final_video in-place
             # For RGBA, write only RGB channels (alpha already written during alpha processing)
-            if ctx.get('is_rgba', False) and ctx['final_video'].shape[-1] == 4:
-                ctx['final_video'][write_start:write_end, :, :, :3] = sample
+            if ctx.is_rgba and ctx.final_video.shape[-1] == 4:
+                ctx.final_video[write_start:write_end, :, :, :3] = sample
             else:
-                ctx['final_video'][write_start:write_end] = sample
+                ctx.final_video[write_start:write_end] = sample
             
             # Free sample memory
             del sample, sample_thwc
@@ -1341,19 +1343,19 @@ def postprocess_all_batches(
                                 1, "Phase 4: Post-processing")
 
         # Verify final assembly
-        if ctx['final_video'] is not None:
+        if ctx.final_video is not None:
             # Remove prepended frames if any were added at the start
-            frames_before_removal = ctx['final_video'].shape[0]
+            frames_before_removal = ctx.final_video.shape[0]
             
             if prepend_frames > 0:
-                if prepend_frames < ctx['final_video'].shape[0]:
+                if prepend_frames < ctx.final_video.shape[0]:
                     debug.log(f"Removing {prepend_frames} prepended frames from output", category="video", force=True)
-                    ctx['final_video'] = ctx['final_video'][prepend_frames:]
+                    ctx.final_video = ctx.final_video[prepend_frames:]
                 else:
-                    debug.log(f"Warning: prepend_frames ({prepend_frames}) >= total frames ({ctx['final_video'].shape[0]}), skipping removal", 
+                    debug.log(f"Warning: prepend_frames ({prepend_frames}) >= total frames ({ctx.final_video.shape[0]}), skipping removal",
                             level="WARNING", category="video", force=True)
 
-            final_shape = ctx['final_video'].shape
+            final_shape = ctx.final_video.shape
             Tf, Hf, Wf, Cf = final_shape[0], final_shape[1], final_shape[2], final_shape[3]
             channels_str = "RGBA" if Cf == 4 else "RGB" if Cf == 3 else f"{Cf}-channel"
             
@@ -1368,7 +1370,7 @@ def postprocess_all_batches(
                 adjustments.append(f"{total_padding_removed} padding")
             
             # Use actual temporal overlap from encoding (may have been reset)
-            actual_overlap = ctx.get('actual_temporal_overlap', temporal_overlap)
+            actual_overlap = (ctx.actual_temporal_overlap if ctx.actual_temporal_overlap is not None else temporal_overlap)
             
             # Calculate and include temporal overlap blending info
             if actual_overlap > 0:
@@ -1385,7 +1387,7 @@ def postprocess_all_batches(
             debug.log(f"Output assembled: {frame_info}, Resolution: {Wf}x{Hf}px, Channels: {channels_str}", 
                     category="generation", force=True)
         else:
-            ctx['final_video'] = torch.empty((0, 0, 0, 0), dtype=ctx['compute_dtype'])
+            ctx.final_video = torch.empty((0, 0, 0, 0), dtype=ctx.compute_dtype)
             debug.log("No frames were processed", level="WARNING", category="generation", force=True)
             
     except Exception as e:
@@ -1394,15 +1396,15 @@ def postprocess_all_batches(
     finally:
         if cleanup:
             # 1. Clean up decode_batch_info and padding stats
-            if 'decode_batch_info' in ctx:
-                del ctx['decode_batch_info']
-            if 'total_padding_removed' in ctx:
-                del ctx['total_padding_removed']
+            if ctx.decode_batch_info is not None:
+                ctx.decode_batch_info = None
+            if ctx.total_padding_removed is not None:
+                ctx.total_padding_removed = None
         
             # 2. Clean up video transform caches
-            if 'video_transform' in ctx and ctx['video_transform'] is not None:
-                if hasattr(ctx['video_transform'], 'transforms'):
-                    for transform in ctx['video_transform'].transforms:
+            if ctx.video_transform is not None:
+                if hasattr(ctx.video_transform, 'transforms'):
+                    for transform in ctx.video_transform.transforms:
                         # Clear cache attributes
                         for cache_attr in ['cache', '_cache']:
                             if hasattr(transform, cache_attr):
@@ -1410,25 +1412,24 @@ def postprocess_all_batches(
                         # Clear remaining attributes
                         if hasattr(transform, '__dict__'):
                             transform.__dict__.clear()
-                del ctx['video_transform']
+                ctx.video_transform = None
         
             # 3. Clean up storage lists (all_latents, all_alpha_channels, etc.)
-            tensor_storage_keys = ['all_latents', 'all_alpha_channels', 'all_input_rgb']
-            for key in tensor_storage_keys:
-                if key in ctx and ctx[key]:
-                    release_tensor_collection(ctx[key])
-                    del ctx[key]
-        
+            for collection in (ctx.all_latents, ctx.all_alpha_channels, ctx.all_input_rgb):
+                if collection:
+                    release_tensor_collection(collection)
+            ctx.all_latents = ctx.all_alpha_channels = ctx.all_input_rgb = None
+
             # 4. Clean up non-tensor storage
-            if 'all_ori_lengths' in ctx:
-                del ctx['all_ori_lengths']
-            if 'true_target_dims' in ctx:
-                del ctx['true_target_dims']
-            if 'batch_metadata' in ctx:
-                del ctx['batch_metadata']
-            if 'input_images' in ctx:
-                release_tensor_memory(ctx['input_images'])
-                del ctx['input_images']
+            if ctx.all_ori_lengths is not None:
+                ctx.all_ori_lengths = None
+            if ctx.true_target_dims is not None:
+                ctx.true_target_dims = None
+            if ctx.batch_metadata is not None:
+                ctx.batch_metadata = None
+            if ctx.input_images is not None:
+                release_tensor_memory(ctx.input_images)
+                ctx.input_images = None
 
     debug.end_timer("phase4_postprocessing", "Phase 4: Post-processing complete", show_breakdown=True)
     debug.log_memory_state("After phase 4 (Post-processing)", show_tensors=False)

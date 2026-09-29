@@ -80,3 +80,10 @@ ffprobe -v error -select_streams v:0 \
 Use a fixed sample set: RGB video, RGBA still, short final batch, `prepend_frames`, temporal overlap, all color modes, and at least one 1080p and 4K target. Record frames, dimensions, PSNR/SSIM plus visual comparisons, RSS peak, CUDA peak allocated bytes, runtime and any retries. Compare 33/330/3300-frame clips at the **same effective chunk/batch/tile plan**: peak memory should stabilize rather than scale with duration. Repeat directory processing with cache on/off and verify no result/context remains retained. Exercise a deliberately oversized initial batch, confirm the retry event, and verify final frame count and the absence of partial outputs. Also interrupt a running encode/decode/write and verify capture, FFmpeg and model cleanup.
 
 The CPU tests cover blend equivalence (including overlap larger than batch stride), all six color modes against the prior four-phase assembly, RGBA behavior, temporal/spatial VAE assembly, alias safety, cache eviction, generator closure, failed writers, OOM rollback, and real FFmpeg 8/10-bit frame counts. They do not substitute for the GPU quality and peak-memory checks above.
+
+## Typed settings and invocation state
+
+The [CLI architecture](architecture.md) keeps per-file plans immutable and uses an
+explicit `GenerationContext` for tensor ownership. Streaming still writes each
+finalized batch immediately; context views are shallow and never serialize or
+deep-copy tensors. A session retains model state only.

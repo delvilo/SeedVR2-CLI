@@ -26,6 +26,7 @@ jobs:
         run: |
           python -m compileall -q inference_cli.py src tests tools
           python inference_cli.py --help
+          python -m mypy
           python -m pytest -q tests
       - name: Check bounded output buffers
         run: python tools/benchmark_memory.py --frames 33 330 --output memory-baseline.json

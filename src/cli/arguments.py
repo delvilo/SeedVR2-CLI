@@ -1,0 +1,306 @@
+"""Argument parsing and validation, with no inference dependencies."""
+
+import argparse
+import math
+import sys
+from collections.abc import Sequence
+
+from ..config import (
+    AppConfig, BlockSwapConfig, CacheConfig, CompileConfig, InferenceConfig,
+    MemoryConfig, ModelConfig, OffloadConfig, OutputConfig, SamplingConfig,
+    TileConfig, VAEConfig, VideoConfig,
+)
+from ..utils.model_registry import DEFAULT_DIT, get_available_dit_models
+
+
+def parse_arguments(argv: Sequence[str] | None = None) -> AppConfig:
+    """
+    Parse and validate command-line arguments for SeedVR2 CLI.
+
+    Configures all available options including model selection, processing parameters,
+    memory optimization settings, and output configuration.
+
+    Returns:
+        Validated, immutable application settings
+
+    Note:
+        - Default model directory resolves to the repo's models/SEEDVR2 if not specified
+    """
+
+    # Get the actual invocation path for usage examples
+    invocation = sys.argv[0]
+
+    # Multi-line usage examples for --help
+    usage_examples = f"""
+Examples:
+
+  Basic image upscaling:
+    python {invocation} image.jpg
+
+  Basic video upscaling with temporal consistency:
+    python {invocation} video.mp4 --resolution 720 --batch_size 33
+
+  Streaming mode for long videos with 10-bit video output (requires FFMPEG):
+    python {invocation} long_video.mp4 --resolution 1080 --batch_size 33 --chunk_size 330 --temporal_overlap 3 --video_backend ffmpeg --10bit
+
+  Memory-optimized for low VRAM (8GB):
+    python {invocation} image.png --dit_model seedvr2_ema_3b-Q8_0.gguf --blocks_to_swap 32 --swap_io_components --dit_offload_device cpu --vae_offload_device cpu
+
+  High resolution with VAE tiling:
+    python {invocation} video.mp4 --resolution 1440 --batch_size 33 --uniform_batch_size --temporal_overlap 3 --vae_encode_tiled --vae_decode_tiled
+
+  Batch directory processing:
+    python {invocation} media_folder/ --output processed/ --cache_dit --cache_vae --dit_offload_device cpu --vae_offload_device cpu --resolution 1080 --max_resolution 1920
+"""
+
+    parser = argparse.ArgumentParser(
+        description="SeedVR2 Video Upscaler - CLI for high-quality image/video upscaling and batch processing",
+        epilog=usage_examples,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False
+    )
+
+    # Input/Output
+    io_group = parser.add_argument_group('Input/Output options')
+    io_group.add_argument("input", type=str,
+                        help="Input: video file (.mp4, .avi, etc.), image file (.png, .jpg, etc.), or directory")
+    io_group.add_argument("--output", type=str, default=None,
+                        help="Output path (default: beside the input with an _upscaled suffix)")
+    io_group.add_argument("--output_format", type=str, default=None, choices=["mp4", "png", None],
+                        help="Output format: 'mp4' (video) or 'png' (image sequence). Default: auto-detect from input type")
+    io_group.add_argument("--video_backend", type=str, default="opencv", choices=["opencv", "ffmpeg"],
+                        help="Video encoder backend: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH)")
+    io_group.add_argument("--10bit", dest="use_10bit", action="store_true",
+                        help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
+                         "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
+    io_group.add_argument("--model_dir", type=str, default=None,
+                        help="Model directory (default: $SEEDVR2_MODEL_DIR or repo/models/SEEDVR2)")
+
+    # Model Selection
+    model_group = parser.add_argument_group('Model selection')
+    model_group.add_argument("--dit_model", type=str, default=DEFAULT_DIT,
+                        choices=get_available_dit_models(),
+                        help="DiT model to use. Options: 3B (fp16/fp8/GGUF) or 7B (fp16/fp8/GGUF). Default: 3B FP8")
+
+    # Processing Parameters
+    process_group = parser.add_argument_group('Processing parameters')
+    process_group.add_argument("--resolution", type=int, default=1080,
+                        help="Target short-side resolution in pixels (default: 1080)")
+    process_group.add_argument("--max_resolution", type=int, default=0,
+                        help="Maximum resolution for any edge. Scales down if exceeded. 0 = no limit (default: 0)")
+    process_group.add_argument("--batch_size", type=int, default=5,
+                        help="Frames per batch (must follow 4n+1: 1, 5, 9, 13, 17, 21,...). "
+                         "Ideally matches shot length for best temporal consistency. Higher values improve "
+                         "quality and speed but require more VRAM. Default: 5")
+    process_group.add_argument("--uniform_batch_size", action="store_true",
+                        help="Pad final batch to match batch_size. Prevents temporal artifacts caused by small "
+                         "final batches. Add extra compute but recommended for optimal quality.")
+    process_group.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
+    process_group.add_argument("--skip_first_frames", type=int, default=0,
+                        help="Skip N initial frames (default: 0)")
+    process_group.add_argument("--load_cap", type=int, default=0,
+                        help="Load maximum N frames from video. 0 = load all (default: 0)")
+    process_group.add_argument("--chunk_size", type=int, default=0,
+                        help="Maximum input frames per chunk. 0 = automatic finite window (at most 33); memory planning may reduce it")
+    process_group.add_argument("--prepend_frames", type=int, default=0,
+                        help="Prepend N reversed frames to reduce start artifacts (auto-removed). Default: 0")
+    process_group.add_argument("--temporal_overlap", type=int, default=0,
+                        help="Frames to overlap between batches/chunks for smooth blending (default: 0)")
+
+    # Quality Control
+    quality_group = parser.add_argument_group('Quality control')
+    quality_group.add_argument("--color_correction", type=str, default="lab",
+                    choices=["lab", "wavelet", "wavelet_adaptive", "hsv", "adain", "none"],
+                    help="Color correction method: 'lab' (perceptual color matching, recommended), 'wavelet' (frequency-based), "
+                    "'wavelet_adaptive' (wavelet + saturation correction), 'hsv' (hue-conditional), 'adain' (statistical transfer), "
+                    "'none' (disabled) (default: lab)")
+    quality_group.add_argument("--input_noise_scale", type=float, default=0.0,
+                        help="Input noise injection scale (0.0-1.0). Adds variation to input images (default: 0.0)")
+    quality_group.add_argument("--latent_noise_scale", type=float, default=0.0,
+                        help="Latent noise injection scale (0.0-1.0). Adds variation to latent space (default: 0.0)")
+
+    # Device Management
+    device_group = parser.add_argument_group('Device management')
+    device_group.add_argument("--cuda_device", type=int, default=None,
+                    help="One visible CUDA device index; default: device 0")
+    device_group.add_argument("--dit_offload_device", type=str, default="cpu",
+                        help="DiT offload device when idle: 'none' (keep on selected GPU) or 'cpu' (offload to RAM). "
+                             "Frees VRAM between phases. Required for BlockSwap. Default: cpu")
+    device_group.add_argument("--vae_offload_device", type=str, default="cpu",
+                        help="VAE offload device when idle: 'none' or 'cpu'. Frees VRAM between phases. Default: cpu")
+    device_group.add_argument("--tensor_offload_device", type=str, default="cpu",
+                        help="Intermediate tensor storage: 'cpu' (recommended) or 'none' (keep on selected GPU). Default: cpu")
+
+    memory_group = parser.add_argument_group('Memory budgets (GiB; planning estimates, not hard limits)')
+    memory_group.add_argument('--ram_budget_gb', type=float, default=0, help='Total free RAM allowance; 0 = 80%% of available RAM')
+    memory_group.add_argument('--vram_budget_gb', type=float, default=0, help='Free VRAM allowance; 0 = 90%% of available VRAM')
+    memory_group.add_argument('--cache_ram_gb', type=float, default=None, help='CPU model cache cap; default = one quarter of RAM allowance, 0 disables retention')
+    memory_group.add_argument('--cache_vram_gb', type=float, default=0, help='GPU model cache cap; default 0')
+    memory_group.add_argument('--memory_report', type=str, default=None, help='Append phase RSS/CUDA peaks and retry events to JSONL')
+    memory_group.add_argument('--oom_retries', type=int, default=3, help='File restarts with smaller chunk/batch/tile sizes after OOM; 0 disables retries')
+
+    # Memory Optimization (BlockSwap)
+    blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
+    blockswap_group.add_argument("--blocks_to_swap", type=int, default=0,
+                        help="Requested minimum blocks to swap for VRAM savings. 0-32 (3B) or 0-36 (7B). "
+                             "The planner/retry policy may increase it. Default: 0")
+    blockswap_group.add_argument("--swap_io_components", action="store_true",
+                        help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
+
+    # VAE Tiling
+    vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')
+    vae_group.add_argument("--vae_encode_tiled", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable VAE encode tiling to reduce VRAM during encoding (default: enabled)")
+    vae_group.add_argument("--vae_encode_tile_size", type=int, default=1024,
+                        help="VAE encode tile size in pixels (default: 1024). Applied to both height and width. Only used if --vae_encode_tiled is set")
+    vae_group.add_argument("--vae_encode_tile_overlap", type=int, default=128,
+                        help="VAE encode tile overlap in pixels (default: 128). Reduces visible seams between tiles. Only used if --vae_encode_tiled is set")
+    vae_group.add_argument("--vae_decode_tiled", action=argparse.BooleanOptionalAction, default=True,
+                        help="Enable VAE decode tiling to reduce VRAM during decoding (default: enabled)")
+    vae_group.add_argument("--vae_decode_tile_size", type=int, default=1024,
+                        help="VAE decode tile size in pixels (default: 1024). Applied to both height and width. Only used if --vae_decode_tiled is set")
+    vae_group.add_argument("--vae_decode_tile_overlap", type=int, default=128,
+                        help="VAE decode tile overlap in pixels (default: 128). Reduces visible seams between tiles. Only used if --vae_decode_tiled is set")
+    vae_group.add_argument("--tile_debug", type=str, default="false", choices=["false", "encode", "decode"],
+                        help="Visualize tiles: 'false' (default), 'encode', or 'decode'")
+
+    # Performance
+    perf_group = parser.add_argument_group('Performance optimization')
+    perf_group.add_argument("--attention_mode", type=str, default="sdpa",
+                        choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
+                        help="Attention backend: 'sdpa' (default), 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3' (Blackwell GPUs)")
+    perf_group.add_argument("--compile_dit", action="store_true",
+                        help="Enable torch.compile for DiT model (20-40%% speedup, requires PyTorch 2.0+ and Triton)")
+    perf_group.add_argument("--compile_vae", action="store_true",
+                        help="Enable torch.compile for VAE model (15-25%% speedup, requires PyTorch 2.0+ and Triton)")
+    perf_group.add_argument("--compile_backend", type=str, default="inductor", choices=["inductor", "cudagraphs"],
+                        help="Compilation backend: 'inductor' (full optimization with Triton) or 'cudagraphs' (lightweight, no kernel optimization) (default: inductor)")
+    perf_group.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
+                        help="Optimization level: 'default' (fast compilation), 'reduce-overhead' (lower overhead), 'max-autotune' (best runtime, slow compilation), "
+                        "'max-autotune-no-cudagraphs' (like max-autotune without cudagraphs) (default: default)")
+    perf_group.add_argument("--compile_fullgraph", action="store_true",
+                        help="Compile entire model as single graph (faster but less flexible). May fail with dynamic shapes (default: False)")
+    perf_group.add_argument("--compile_dynamic", action="store_true",
+                        help="Handle varying input shapes without recompilation. Useful for different resolutions/batch sizes (default: False)")
+    perf_group.add_argument("--compile_dynamo_cache_size_limit", type=int, default=64,
+                        help="Max cached compiled versions per function. Increase when using many different input shapes. Higher uses more memory (default: 64)")
+    perf_group.add_argument("--compile_dynamo_recompile_limit", type=int, default=128,
+                        help="Max recompilation attempts before fallback to eager mode. Safety limit to prevent compilation loops (default: 128)")
+
+    # Model Caching (for batch processing)
+    cache_group = parser.add_argument_group('Model caching (batch processing)')
+    cache_group.add_argument("--cache_dit", action="store_true",
+                        help="Keep DiT model in memory between files. Subject to cache memory caps; idle models default to CPU")
+    cache_group.add_argument("--cache_vae", action="store_true",
+                        help="Keep VAE model in memory between files. Subject to cache memory caps; idle models default to CPU")
+
+    # Debugging
+    debug_group = parser.add_argument_group('Debugging')
+    debug_group.add_argument("--debug", action="store_true",
+                        help="Enable verbose debug logging")
+
+    # Auto-show help if no arguments provided
+    argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(argv or ['--help'])
+    for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap',
+                 'oom_retries', 'ram_budget_gb', 'vram_budget_gb', 'cache_vram_gb', 'cache_ram_gb'):
+        value = getattr(args, name)
+        if value is not None and (not math.isfinite(value) or value < 0):
+            parser.error(f'--{name} must be finite and nonnegative')
+    if args.batch_size < 1 or args.batch_size % 4 != 1:
+        parser.error('--batch_size must be 4n+1 (1, 5, 9, ...)')
+    if args.resolution < 1 or args.max_resolution < 0:
+        parser.error('Resolution must be positive and max_resolution nonnegative')
+    for phase in ('encode', 'decode'):
+        size, overlap = getattr(args, f'vae_{phase}_tile_size'), getattr(args, f'vae_{phase}_tile_overlap')
+        if size < 128 or size % 64 or overlap < 0 or overlap >= size:
+            parser.error(f'VAE {phase} tile size must be a multiple of 64 >= 128; overlap must be in [0, size)')
+    if args.use_10bit and args.video_backend != 'ffmpeg':
+        parser.error('--10bit requires --video_backend ffmpeg')
+    if args.cuda_device is not None and args.cuda_device < 0:
+        parser.error("--cuda_device must be a non-negative CUDA device index")
+    return config_from_namespace(args)
+
+
+def config_from_namespace(a: argparse.Namespace) -> AppConfig:
+    """Translate validated CLI values once; downstream code only sees dataclasses."""
+    return AppConfig(
+        inference=InferenceConfig(
+            model=ModelConfig(
+                dit_model=a.dit_model,
+                model_dir=a.model_dir,
+            ),
+            sampling=SamplingConfig(
+                resolution=a.resolution,
+                max_resolution=a.max_resolution,
+                batch_size=a.batch_size,
+                uniform_batch_size=a.uniform_batch_size,
+                seed=a.seed,
+                prepend_frames=a.prepend_frames,
+                temporal_overlap=a.temporal_overlap,
+                color_correction=a.color_correction,
+                input_noise_scale=a.input_noise_scale,
+                latent_noise_scale=a.latent_noise_scale,
+            ),
+            offload=OffloadConfig(
+                dit=a.dit_offload_device,
+                vae=a.vae_offload_device,
+                tensor=a.tensor_offload_device,
+            ),
+            vae=VAEConfig(
+                encode=TileConfig(
+                    enabled=a.vae_encode_tiled,
+                    size=a.vae_encode_tile_size,
+                    overlap=a.vae_encode_tile_overlap,
+                ),
+                decode=TileConfig(
+                    enabled=a.vae_decode_tiled,
+                    size=a.vae_decode_tile_size,
+                    overlap=a.vae_decode_tile_overlap,
+                ),
+                debug=a.tile_debug,
+            ),
+            compile=CompileConfig(
+                dit=a.compile_dit,
+                vae=a.compile_vae,
+                backend=a.compile_backend,
+                mode=a.compile_mode,
+                fullgraph=a.compile_fullgraph,
+                dynamic=a.compile_dynamic,
+                dynamo_cache_size_limit=a.compile_dynamo_cache_size_limit,
+                dynamo_recompile_limit=a.compile_dynamo_recompile_limit,
+            ),
+            cache=CacheConfig(
+                dit=a.cache_dit,
+                vae=a.cache_vae,
+                ram_gb=a.cache_ram_gb,
+                vram_gb=a.cache_vram_gb,
+            ),
+            swap=BlockSwapConfig(
+                blocks_to_swap=a.blocks_to_swap,
+                swap_io_components=a.swap_io_components,
+            ),
+            attention_mode=a.attention_mode,
+        ),
+        video=VideoConfig(
+            chunk_size=a.chunk_size,
+            skip_first_frames=a.skip_first_frames,
+            load_cap=a.load_cap,
+        ),
+        memory=MemoryConfig(
+            ram_budget_gb=a.ram_budget_gb,
+            vram_budget_gb=a.vram_budget_gb,
+            oom_retries=a.oom_retries,
+            report=a.memory_report,
+        ),
+        output=OutputConfig(
+            path=a.output,
+            format=a.output_format,
+            video_backend=a.video_backend,
+            use_10bit=a.use_10bit,
+        ),
+        input=a.input,
+        cuda_device=a.cuda_device if a.cuda_device is not None else 0,
+        debug=a.debug,
+    )

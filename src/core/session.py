@@ -1,6 +1,15 @@
 """One CLI session owns one runner and its bounded model cache."""
 
+from __future__ import annotations
 from pathlib import Path
+from collections.abc import Generator
+from typing import TYPE_CHECKING
+
+from ..config import InferenceConfig
+
+if TYPE_CHECKING:
+    import torch
+    from ..utils.debug import Debug
 
 
 def checkpoint_identity(path):
@@ -27,12 +36,21 @@ def resident_bytes(model):
 
 
 class InferenceSession:
-    def __init__(self, ram_cache_bytes=0, vram_cache_bytes=0, debug=None):
+    def __init__(self, ram_cache_bytes: int = 0, vram_cache_bytes: int = 0, debug: Debug | None = None):
         self.runner = None
         self.key = None
         self.ram_cache_bytes = ram_cache_bytes
         self.vram_cache_bytes = vram_cache_bytes
+        if debug is None:
+            from ..utils.debug import Debug
+            debug = Debug(False)
         self.debug = debug
+
+    def iter_batches(self, frames: torch.Tensor, config: InferenceConfig,
+                     device: str = "cuda:0", memory_report: str | None = None) -> Generator[torch.Tensor, None, None]:
+        """Yield one window's finalized batches; the caller must close early exits."""
+        from .pipeline import iter_processed_batches
+        return iter_processed_batches(frames, config, device, self.debug, self, memory_report)
 
     def acquire(self, key, factory):
         if key != self.key:

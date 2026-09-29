@@ -54,6 +54,10 @@ BlockSwap Management:
 This module uses model_loader for actual weight loading operations.
 """
 
+from .context import GenerationContext
+
+from ..config import BlockSwapConfig, CompileConfig
+
 import os
 import torch
 from omegaconf import OmegaConf
@@ -77,14 +81,14 @@ from ..optimization.memory_manager import cleanup_dit, cleanup_vae
 from ..utils.constants import find_model_file
 
 
-def _configs_equal(config1: Optional[Dict[str, Any]], config2: Optional[Dict[str, Any]]) -> bool:
+def _configs_equal(config1: object, config2: object) -> bool:
     """
-    Compare two configuration dictionaries for equality.
+    Compare typed configuration objects or local metadata for equality.
     Handles None values properly.
     
     Args:
-        config1: First configuration dict (can be None)
-        config2: Second configuration dict (can be None)
+        config1: First configuration object (can be None)
+        config2: Second configuration object (can be None)
         
     Returns:
         True if configs are equivalent, False otherwise
@@ -97,16 +101,16 @@ def _configs_equal(config1: Optional[Dict[str, Any]], config2: Optional[Dict[str
     if (config1 is None) != (config2 is None):
         return False
     
-    # Compare dictionary contents
+    # Compare typed settings or local metadata
     return config1 == config2
 
 
-def _describe_blockswap_config(config: Optional[Dict[str, Any]]) -> str:
+def _describe_blockswap_config(config: Optional[BlockSwapConfig]) -> str:
     """
     Generate human-readable description of BlockSwap configuration.
     
     Args:
-        config: BlockSwap configuration dictionary
+        config: BlockSwap configuration object
         
     Returns:
         Human-readable description string
@@ -114,8 +118,8 @@ def _describe_blockswap_config(config: Optional[Dict[str, Any]]) -> str:
     if not is_blockswap_enabled(config):
         return "disabled"
     
-    blocks_to_swap = config.get("blocks_to_swap", 0)
-    swap_io_components = config.get("swap_io_components", False)
+    blocks_to_swap = config.blocks_to_swap
+    swap_io_components = config.swap_io_components
     
     block_text = "block" if blocks_to_swap <= 1 else "blocks"
     parts = [f"{blocks_to_swap} {block_text}"]
@@ -125,12 +129,12 @@ def _describe_blockswap_config(config: Optional[Dict[str, Any]]) -> str:
     return f"enabled ({', '.join(parts)})"
 
 
-def _describe_compile_config(config: Optional[Dict[str, Any]]) -> str:
+def _describe_compile_config(config: Optional[CompileConfig]) -> str:
     """
     Generate human-readable description of torch.compile configuration.
     
     Args:
-        config: torch.compile configuration dictionary
+        config: torch.compile configuration object
         
     Returns:
         Human-readable description string
@@ -139,22 +143,22 @@ def _describe_compile_config(config: Optional[Dict[str, Any]]) -> str:
         return "disabled"
     
     # Core parameters
-    mode = config.get("mode", "default")
-    backend = config.get("backend", "inductor")
+    mode = config.mode
+    backend = config.backend
     
     parts = [f"{mode} mode"]
     
     # Optional flags
     if backend != "inductor":
         parts.append(f"{backend} backend")
-    if config.get("fullgraph", False):
+    if config.fullgraph:
         parts.append("fullgraph")
-    if config.get("dynamic", False):
+    if config.dynamic:
         parts.append("dynamic")
     
     # Dynamo tuning parameters (show if non-default)
-    cache_limit = config.get("dynamo_cache_size_limit", 64)
-    recompile_limit = config.get("dynamo_recompile_limit", 128)
+    cache_limit = config.dynamo_cache_size_limit
+    recompile_limit = config.dynamo_recompile_limit
     
     if cache_limit != 64:
         parts.append(f"cache_limit={cache_limit}")
@@ -379,7 +383,7 @@ def _update_model_config(
 def _handle_blockswap_change(
     runner: 'VideoDiffusionInfer',
     attr_name: str,
-    new_config: Optional[Dict[str, Any]],
+    new_config: Optional[BlockSwapConfig],
     debug: Optional['Debug'] = None
 ) -> None:
     """
@@ -413,8 +417,8 @@ def _handle_blockswap_change(
 
 def _update_dit_config(
     runner: 'VideoDiffusionInfer',
-    block_swap_config: Optional[Dict[str, Any]],
-    torch_compile_args: Optional[Dict[str, Any]],
+    block_swap_config: Optional[BlockSwapConfig],
+    torch_compile_args: Optional[CompileConfig],
     attention_mode: Optional[str],
     debug: Optional['Debug'] = None
 ) -> bool:
@@ -427,10 +431,10 @@ def _update_dit_config(
     
     Args:
         runner: VideoDiffusionInfer instance with cached DiT model
-        block_swap_config: New BlockSwap configuration dict with keys:
+        block_swap_config: New BlockSwap configuration object with fields:
             - blocks_to_swap: int - Number of transformer blocks to offload
             - swap_io_components: bool - Whether to offload I/O components
-        torch_compile_args: New torch.compile configuration dict with keys:
+        torch_compile_args: New torch.compile configuration object with fields:
             - backend: str - Compiler backend (default: "inductor")
             - mode: str - Compilation mode (default: "default")
             - fullgraph: bool - Require single graph compilation
@@ -476,7 +480,7 @@ def _update_dit_config(
 
 def _update_vae_config(
     runner: 'VideoDiffusionInfer',
-    torch_compile_args: Optional[Dict[str, Any]],
+    torch_compile_args: Optional[CompileConfig],
     debug: Optional['Debug'] = None
 ) -> bool:
     """
@@ -488,7 +492,7 @@ def _update_vae_config(
     
     Args:
         runner: VideoDiffusionInfer instance with cached VAE model
-        torch_compile_args: New torch.compile configuration dict with keys:
+        torch_compile_args: New torch.compile configuration object with fields:
             - backend: str - Compiler backend (default: "inductor")
             - mode: str - Compilation mode (default: "default")
             - fullgraph: bool - Require single graph compilation
@@ -578,11 +582,11 @@ def configure_runner(
     vae_model: str,
     base_cache_dir: str,
     debug: 'Debug',
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     dit_cache: bool = False,
     vae_cache: bool = False,
     session: Optional[InferenceSession] = None,
-    block_swap_config: Optional[Dict[str, Any]] = None,
+    block_swap_config: Optional[BlockSwapConfig] = None,
     encode_tiled: bool = False,
     encode_tile_size: Optional[Tuple[int, int]] = None,
     encode_tile_overlap: Optional[Tuple[int, int]] = None,
@@ -591,9 +595,9 @@ def configure_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
-    torch_compile_args_dit: Optional[Dict[str, Any]] = None,
-    torch_compile_args_vae: Optional[Dict[str, Any]] = None
-) -> Tuple[VideoDiffusionInfer, Dict[str, Any]]:
+    torch_compile_args_dit: Optional[CompileConfig] = None,
+    torch_compile_args_vae: Optional[CompileConfig] = None
+) -> VideoDiffusionInfer:
     """
     Configure VideoDiffusionInfer runner with model loading and settings.
     
@@ -621,7 +625,7 @@ def configure_runner(
         torch_compile_args_vae: Optional torch.compile configuration for VAE model
         
     Returns:
-        Tuple[VideoDiffusionInfer, Dict[str, Any]]: (configured runner, cache context dict)
+        VideoDiffusionInfer: Configured runner
         
     Features:
         - Independent DiT and VAE caching for flexible memory management
@@ -640,20 +644,18 @@ def configure_runner(
     # Validate BlockSwap configuration early (before any model loading)
     block_swap_config = validate_blockswap_config(
         block_swap_config=block_swap_config,
-        dit_device=ctx['dit_device'],
-        dit_offload_device=ctx.get('dit_offload_device'),
+        dit_device=ctx.dit_device,
+        dit_offload_device=ctx.dit_offload_device,
         debug=debug
     )
     
     key = (checkpoint_identity(os.path.join(base_cache_dir, dit_model)),
            checkpoint_identity(os.path.join(base_cache_dir, vae_model)),
-           str(ctx['dit_device']), str(ctx['vae_device']), str(ctx['compute_dtype']))
+           str(ctx.dit_device), str(ctx.vae_device), str(ctx.compute_dtype))
     factory = lambda: _create_new_runner(dit_model, vae_model, base_cache_dir, debug)
     runner = session.acquire(key, factory) if session is not None else factory()
-    cache_context = {
-        'cached_dit': getattr(runner, 'dit', None) if dit_cache else None,
-        'cached_vae': getattr(runner, 'vae', None) if vae_cache else None,
-    }
+    cached_dit = getattr(runner, 'dit', None) if dit_cache else None
+    cached_vae = getattr(runner, 'vae', None) if vae_cache else None
 
     # Phase 3: Configure runner settings
     _configure_runner_settings(
@@ -667,16 +669,16 @@ def configure_runner(
     
     # Phase 4: Setup models (load from cache or create new)
     _setup_models(
-        runner, cache_context, dit_model, vae_model, 
+        runner, cached_dit, cached_vae, dit_model, vae_model,
         base_cache_dir, block_swap_config, debug
     )
     
-    return runner, cache_context
+    return runner
 
 
 def _configure_runner_settings(
     runner: VideoDiffusionInfer,
-    ctx: Dict[str, Any],
+    ctx: GenerationContext,
     encode_tiled: bool,
     encode_tile_size: Optional[Tuple[int, int]],
     encode_tile_overlap: Optional[Tuple[int, int]],
@@ -685,9 +687,9 @@ def _configure_runner_settings(
     decode_tile_overlap: Optional[Tuple[int, int]],
     tile_debug: str,
     attention_mode: str,
-    torch_compile_args_dit: Optional[Dict[str, Any]],
-    torch_compile_args_vae: Optional[Dict[str, Any]],
-    block_swap_config: Optional[Dict[str, Any]],
+    torch_compile_args_dit: Optional[CompileConfig],
+    torch_compile_args_vae: Optional[CompileConfig],
+    block_swap_config: Optional[BlockSwapConfig],
     debug: Optional['Debug'] = None
 ) -> None:
     """
@@ -739,23 +741,24 @@ def _configure_runner_settings(
     }
     
     # Store device configuration on runner for submodule access (e.g., BlockSwap, Cleanup)
-    runner._dit_device = ctx['dit_device']
-    runner._vae_device = ctx['vae_device']
-    runner._dit_offload_device = ctx['dit_offload_device']
-    runner._vae_offload_device = ctx['vae_offload_device']
-    runner._tensor_offload_device = ctx['tensor_offload_device']
-    runner._compute_dtype = ctx['compute_dtype']
+    runner._dit_device = ctx.dit_device
+    runner._vae_device = ctx.vae_device
+    runner._dit_offload_device = ctx.dit_offload_device
+    runner._vae_offload_device = ctx.vae_offload_device
+    runner._tensor_offload_device = ctx.tensor_offload_device
+    runner._compute_dtype = ctx.compute_dtype
 
     runner.debug = debug
 
 
 def _setup_models(
     runner: VideoDiffusionInfer,
-    cache_context: Dict[str, Any],
+    cached_dit: Optional[torch.nn.Module],
+    cached_vae: Optional[torch.nn.Module],
     dit_model: str,
     vae_model: str,
     base_cache_dir: str,
-    block_swap_config: Optional[Dict[str, Any]],
+    block_swap_config: Optional[BlockSwapConfig],
     debug: Optional['Debug'] = None
 ) -> None:
     """
@@ -773,9 +776,8 @@ def _setup_models(
     
     Args:
         runner: VideoDiffusionInfer instance to setup
-        cache_context: Invocation-local cache references with keys:
-            - cached_dit, cached_vae: Cached model instances (or None)
-            - Other cache state flags
+        cached_dit: Invocation-local DiT model reference, if retained
+        cached_vae: Invocation-local VAE model reference, if retained
         dit_model: DiT model filename for loading/validation
         vae_model: VAE model filename for loading/validation
         base_cache_dir: Base directory containing model files
@@ -785,7 +787,7 @@ def _setup_models(
     debug.start_timer("model_structures")
     
     # Setup DiT
-    dit_created = _setup_dit_model(runner, cache_context, dit_model, base_cache_dir, 
+    dit_created = _setup_dit_model(runner, cached_dit, dit_model, base_cache_dir,
                                    block_swap_config, debug)
     
     # Only update DiT config if model was cached/reused (not newly created)
@@ -804,7 +806,7 @@ def _setup_models(
             runner.dit._config_attn = runner._new_dit_attention_mode
     
     # Setup VAE
-    vae_created = _setup_vae_model(runner, cache_context, vae_model, base_cache_dir, debug)
+    vae_created = _setup_vae_model(runner, cached_vae, vae_model, base_cache_dir, debug)
     
     # Only update VAE config if model was cached/reused (not newly created)
     if not vae_created and hasattr(runner, 'vae') and runner.vae is not None:
@@ -828,10 +830,10 @@ def _setup_models(
 
 def _setup_dit_model(
     runner: VideoDiffusionInfer,
-    cache_context: Dict[str, Any],
+    cached_dit: Optional[torch.nn.Module],
     dit_model: str,
     base_cache_dir: str,
-    block_swap_config: Optional[Dict[str, Any]],
+    block_swap_config: Optional[BlockSwapConfig],
     debug: Optional['Debug'] = None
 ) -> bool:
     """
@@ -844,8 +846,7 @@ def _setup_dit_model(
     
     Args:
         runner: VideoDiffusionInfer instance to setup
-        cache_context: Cache context dict with keys:
-            - cached_dit: Cached DiT model instance (or None)
+        cached_dit: Invocation-local DiT model reference, if retained
         dit_model: DiT model filename (e.g., "seedvr2_ema_3b_fp16.safetensors")
         base_cache_dir: Base directory containing model files
         block_swap_config: BlockSwap configuration to store (not applied here)
@@ -863,11 +864,11 @@ def _setup_dit_model(
                      category="cache", force=True)
             cleanup_dit(runner=runner, debug=debug, cache_model=False)
     
-    if cache_context['cached_dit'] is not None:
+    if cached_dit is not None:
         # Reuse cached DiT model
         debug.log(f"Reusing cached DiT (session): {dit_model}",
                 category="reuse", force=True)
-        runner.dit = cache_context['cached_dit']
+        runner.dit = cached_dit
         runner._dit_checkpoint = find_model_file(dit_model, base_cache_dir)
         runner._dit_model_name = dit_model
         
@@ -902,7 +903,7 @@ def _setup_dit_model(
 
 def _setup_vae_model(
     runner: VideoDiffusionInfer,
-    cache_context: Dict[str, Any],
+    cached_vae: Optional[torch.nn.Module],
     vae_model: str,
     base_cache_dir: str,
     debug: Optional['Debug'] = None
@@ -917,8 +918,7 @@ def _setup_vae_model(
     
     Args:
         runner: VideoDiffusionInfer instance to setup
-        cache_context: Cache context dict with keys:
-            - cached_vae: Cached VAE model instance (or None)
+        cached_vae: Invocation-local VAE model reference, if retained
         vae_model: VAE model filename (e.g., "ema_vae_fp16.safetensors")
         base_cache_dir: Base directory containing model files
         debug: Debug instance for logging
@@ -935,11 +935,11 @@ def _setup_vae_model(
                      category="cache", force=True)
             cleanup_vae(runner=runner, debug=debug, cache_model=False)
     
-    if cache_context['cached_vae'] is not None:
+    if cached_vae is not None:
         # Reuse cached VAE model
         debug.log(f"Reusing cached VAE (session): {vae_model}",
                 category="reuse", force=True)
-        runner.vae = cache_context['cached_vae']
+        runner.vae = cached_vae
         runner._vae_checkpoint = find_model_file(vae_model, base_cache_dir)
         runner._vae_model_name = vae_model
         
@@ -1119,7 +1119,7 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
     return model
 
 
-def _configure_torch_compile(compile_args: Dict[str, Any], model_type: str, 
+def _configure_torch_compile(compile_args: CompileConfig, model_type: str,
                             debug: Optional['Debug'] = None) -> Tuple[Dict[str, Any], bool]:
     """
     Extract and configure torch.compile settings with dependency validation.
@@ -1129,7 +1129,7 @@ def _configure_torch_compile(compile_args: Dict[str, Any], model_type: str,
     before attempting compilation to provide early, clear error messages.
     
     Args:
-        compile_args: Compilation configuration dictionary
+        compile_args: Compilation configuration object
         model_type: Model type string for logging (e.g., "DiT", "VAE")
         debug: Debug instance for logging
         
@@ -1142,14 +1142,14 @@ def _configure_torch_compile(compile_args: Dict[str, Any], model_type: str,
     """
     # Extract settings with defaults
     settings = {
-        'backend': compile_args.get('backend', 'inductor'),
-        'mode': compile_args.get('mode', 'default'),
-        'fullgraph': compile_args.get('fullgraph', False),
-        'dynamic': compile_args.get('dynamic', False)
+        'backend': compile_args.backend,
+        'mode': compile_args.mode,
+        'fullgraph': compile_args.fullgraph,
+        'dynamic': compile_args.dynamic
     }
     
-    dynamo_cache_size_limit = compile_args.get('dynamo_cache_size_limit', 64)
-    dynamo_recompile_limit = compile_args.get('dynamo_recompile_limit', 128)
+    dynamo_cache_size_limit = compile_args.dynamo_cache_size_limit
+    dynamo_recompile_limit = compile_args.dynamo_recompile_limit
     
     # Check Triton availability for inductor backend BEFORE attempting compilation
     if settings['backend'] == 'inductor':
@@ -1193,7 +1193,7 @@ def _configure_torch_compile(compile_args: Dict[str, Any], model_type: str,
         return settings, False
 
 
-def _apply_torch_compile(model: torch.nn.Module, compile_args: Dict[str, Any], 
+def _apply_torch_compile(model: torch.nn.Module, compile_args: CompileConfig,
                         model_type: str, debug: Optional['Debug'] = None) -> torch.nn.Module:
     """
     Apply torch.compile to entire model with configured settings.
@@ -1239,7 +1239,7 @@ def _disable_compile_for_dynamic_modules(module: torch.nn.Module) -> None:
             submodule._dynamo_disable = True
 
 
-def _apply_vae_submodule_compile(model: torch.nn.Module, compile_args: Dict[str, Any], 
+def _apply_vae_submodule_compile(model: torch.nn.Module, compile_args: CompileConfig,
                                  debug: Optional['Debug'] = None) -> torch.nn.Module:
     """
     Apply torch.compile to VAE core submodules instead of entire model.
