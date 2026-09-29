@@ -161,17 +161,19 @@ class InflatedCausalConv3d(Conv3d):
             prev_cache = list(prev_cache.split(split_sizes, dim=split_dim))
         # Loop Fwd.
         cache = None
-        for idx in range(len(x)):
+        last_idx = len(x) - 1
+        for idx, x_slice in enumerate(x):
             # Concat prev cache from last dim
             if prev_cache is not None:
-                x[idx] = torch.cat([prev_cache[idx], x[idx]], dim=split_dim - 1)
+                x_slice = torch.cat([prev_cache[idx], x_slice], dim=split_dim - 1)
+                x[idx] = x_slice
 
             # Get padding pattern.
-            lpad_dim = (x[idx].ndim - split_dim - 1) * 2
+            lpad_dim = (x_slice.ndim - split_dim - 1) * 2
             rpad_dim = lpad_dim + 1
             padding = list(padding)
             padding[lpad_dim] = self.padding[split_dim - 2] if idx == 0 else 0
-            padding[rpad_dim] = self.padding[split_dim - 2] if idx == len(x) - 1 else 0
+            padding[rpad_dim] = self.padding[split_dim - 2] if idx == last_idx else 0
             pad_len = padding[lpad_dim] + padding[rpad_dim]
             padding = tuple(padding)
 
@@ -180,19 +182,19 @@ class InflatedCausalConv3d(Conv3d):
             cache_len = cache.size(split_dim) if cache is not None else 0
             next_catch_size = get_cache_size(
                 conv_module=self,
-                input_len=x[idx].size(split_dim) + cache_len,
+                input_len=x_slice.size(split_dim) + cache_len,
                 pad_len=pad_len,
                 dim=split_dim - 2,
             )
             if next_catch_size != 0:
-                assert next_catch_size <= x[idx].size(split_dim)
+                assert next_catch_size <= x_slice.size(split_dim)
                 next_cache = (
-                    x[idx].transpose(0, split_dim)[-next_catch_size:].transpose(0, split_dim)
+                    x_slice.transpose(0, split_dim)[-next_catch_size:].transpose(0, split_dim)
                 )
 
             # Recursive.
             x[idx] = self.memory_limit_conv(
-                x[idx],
+                x_slice,
                 split_dim=split_dim + 1,
                 padding=padding,
                 prev_cache=cache
@@ -200,7 +202,6 @@ class InflatedCausalConv3d(Conv3d):
 
             # Update cache.
             cache = next_cache
-
         output = retry_on_oom(
             torch.cat,
             x,
