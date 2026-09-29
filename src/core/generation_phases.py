@@ -28,7 +28,7 @@ from .context import GenerationContext
 import os
 import sys
 import torch
-from typing import Dict, List, Optional, Tuple, Any, Callable
+from typing import Optional, Callable
 
 from .generation_utils import (
     setup_video_transform,
