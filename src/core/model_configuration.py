@@ -222,6 +222,133 @@ def _describe_tiling_config(encode_tiled: bool, encode_tile_size: Optional[Tuple
     return "; ".join(parts)
 
     
+def _is_meta_device_model(model: torch.nn.Module) -> bool:
+    """Check if model parameters are on meta device (not materialized yet)."""
+    try:
+        param_device = next(model.parameters()).device
+        return param_device.type == 'meta'
+    except StopIteration:
+        return False
+
+
+def _sync_model_config_attributes(
+    runner: 'VideoDiffusionInfer',
+    model: torch.nn.Module,
+    new_configs: Dict[str, Any],
+    cached_config_attrs: Dict[str, str],
+    model_config_attrs: Optional[Dict[str, str]] = None
+) -> None:
+    """Sync configuration attributes to both runner and model objects."""
+    for config_name, attr_name in cached_config_attrs.items():
+        setattr(runner, attr_name, new_configs.get(config_name))
+
+        if model_config_attrs and config_name in model_config_attrs:
+            model_attr_name = model_config_attrs[config_name]
+        else:
+            model_attr_name = f'_config_{config_name.split("_")[-1]}'
+        setattr(model, model_attr_name, new_configs.get(config_name))
+
+
+def _format_config_display_name(config_name: str) -> str:
+    """Format config property name for display in logs."""
+    if config_name == 'torch_compile':
+        return 'torch.compile'
+    elif config_name == 'block_swap':
+        return 'BlockSwap'
+    elif config_name == 'attention_mode':
+        return 'Attention Mode'
+    return config_name.replace('_', ' ').title()
+
+
+def _describe_config_change(
+    config_name: str,
+    cached_value: Any,
+    new_value: Any,
+    desc_func: Callable
+) -> str:
+    """Generate human-readable change string for a specific config attribute."""
+    if config_name == 'tiling':
+        old_cfg = cached_value or {}
+        new_cfg = new_value or {}
+        old_desc = desc_func(
+            old_cfg.get('encode_tiled', False),
+            old_cfg.get('encode_tile_size'),
+            old_cfg.get('encode_tile_overlap'),
+            old_cfg.get('decode_tiled', False),
+            old_cfg.get('decode_tile_size'),
+            old_cfg.get('decode_tile_overlap')
+        )
+        new_desc = desc_func(
+            new_cfg.get('encode_tiled', False),
+            new_cfg.get('encode_tile_size'),
+            new_cfg.get('encode_tile_overlap'),
+            new_cfg.get('decode_tiled', False),
+            new_cfg.get('decode_tile_size'),
+            new_cfg.get('decode_tile_overlap')
+        )
+    else:
+        old_desc = desc_func(cached_value)
+        new_desc = desc_func(new_value)
+
+    display_name = _format_config_display_name(config_name)
+    return f"{display_name}: {old_desc} → {new_desc}"
+
+
+def _detect_config_changes(
+    runner: 'VideoDiffusionInfer',
+    new_configs: Dict[str, Any],
+    cached_config_attrs: Dict[str, str],
+    config_describers: Dict[str, Callable]
+) -> Tuple[Dict[str, bool], List[str]]:
+    """
+    Detect configuration changes between runner's cached attributes and new configs.
+
+    Returns:
+        Tuple of (changes_detected dict, config_changes description list)
+    """
+    config_changes = []
+    changes_detected = {}
+
+    for config_name, attr_name in cached_config_attrs.items():
+        cached_value = getattr(runner, attr_name, None)
+        new_value = new_configs.get(config_name)
+        changed = not _configs_equal(cached_value, new_value)
+        changes_detected[config_name] = changed
+
+        if changed:
+            desc_func = config_describers.get(config_name)
+            if desc_func:
+                change_desc = _describe_config_change(config_name, cached_value, new_value, desc_func)
+                config_changes.append(change_desc)
+
+    return changes_detected, config_changes
+
+
+def _unwrap_compiled_model(
+    model: torch.nn.Module,
+    model_attr: str,
+    model_type: str,
+    runner: 'VideoDiffusionInfer',
+    debug: Optional['Debug'] = None
+) -> torch.nn.Module:
+    """Unwrap torch.compile wrappers from DiT model or VAE encoder/decoder submodules if present."""
+    if model_attr == 'dit' and hasattr(model, '_orig_mod'):
+        if debug:
+            debug.log(f"Removing torch.compile from {model_type}", category="setup")
+        model = model._orig_mod
+        setattr(runner, model_attr, model)
+    elif model_attr == 'vae':
+        if hasattr(model, 'encoder') and hasattr(model.encoder, '_orig_mod'):
+            if debug:
+                debug.log(f"Removing torch.compile from {model_type} encoder", category="setup")
+            model.encoder = model.encoder._orig_mod
+        if hasattr(model, 'decoder') and hasattr(model.decoder, '_orig_mod'):
+            if debug:
+                debug.log(f"Removing torch.compile from {model_type} decoder", category="setup")
+            model.decoder = model.decoder._orig_mod
+    return model
+
+
 def _update_model_config(
     runner: 'VideoDiffusionInfer',
     model_attr: str,
@@ -261,96 +388,31 @@ def _update_model_config(
     model = getattr(runner, model_attr)
     
     # Check if model is on meta device (not materialized yet)
-    try:
-        param_device = next(model.parameters()).device
-        if param_device.type == 'meta':
-            # Model not yet materialized - just update config attributes
-            for config_name, attr_name in cached_config_attrs.items():
-                setattr(runner, attr_name, new_configs.get(config_name))
-            # Store on model so config travels with the model when cached
-            for config_name, attr_name in cached_config_attrs.items():
-                model_attr_name = f'_config_{config_name.split("_")[-1]}'
-                setattr(model, model_attr_name, new_configs.get(config_name))
-            return True
-    except StopIteration:
-        pass
+    if _is_meta_device_model(model):
+        _sync_model_config_attributes(runner, model, new_configs, cached_config_attrs, model_config_attrs)
+        return True
     
     # Get cached configurations and check what changed
-    config_changes = []
-    changes_detected = {}
-    
-    for config_name, attr_name in cached_config_attrs.items():
-        cached_value = getattr(runner, attr_name, None)
-        new_value = new_configs.get(config_name)
-        changed = not _configs_equal(cached_value, new_value)
-        changes_detected[config_name] = changed
-        
-        if changed:
-            # Get description function for this config type
-            desc_func = config_describers.get(config_name)
-            if desc_func:
-                if config_name == 'tiling':
-                    # Special case for tiling which needs multiple params
-                    old_cfg = cached_value or {}
-                    new_cfg = new_value or {}
-                    old_desc = desc_func(
-                        old_cfg.get('encode_tiled', False),
-                        old_cfg.get('encode_tile_size'),
-                        old_cfg.get('encode_tile_overlap'),
-                        old_cfg.get('decode_tiled', False),
-                        old_cfg.get('decode_tile_size'),
-                        old_cfg.get('decode_tile_overlap')
-                    )
-                    new_desc = desc_func(
-                        new_cfg.get('encode_tiled', False),
-                        new_cfg.get('encode_tile_size'),
-                        new_cfg.get('encode_tile_overlap'),
-                        new_cfg.get('decode_tiled', False),
-                        new_cfg.get('decode_tile_size'),
-                        new_cfg.get('decode_tile_overlap')
-                    )
-                else:
-                    old_desc = desc_func(cached_value)
-                    new_desc = desc_func(new_value)
-                
-                # Format config name for display
-                display_name = config_name.replace('_', ' ').title()
-                if config_name == 'torch_compile':
-                    display_name = 'torch.compile'
-                elif config_name == 'block_swap':
-                    display_name = 'BlockSwap'
-                elif config_name == 'attention_mode':
-                    display_name = 'Attention Mode'
-                    
-                config_changes.append(f"{display_name}: {old_desc} → {new_desc}")
+    changes_detected, config_changes = _detect_config_changes(
+        runner, new_configs, cached_config_attrs, config_describers
+    )
     
     # If nothing changed, reuse model as-is
     if not any(changes_detected.values()):
-        debug.log(f"{model_type} configuration unchanged, reusing cached model", category=model_type.lower())
-        # Still update attributes to ensure consistency
-        for config_name, attr_name in cached_config_attrs.items():
-            setattr(runner, attr_name, new_configs.get(config_name))
+        if debug:
+            debug.log(f"{model_type} configuration unchanged, reusing cached model", category=model_type.lower())
+        _sync_model_config_attributes(runner, model, new_configs, cached_config_attrs, model_config_attrs)
         return True
     
     # Log configuration changes
-    debug.log(f"{model_type} configuration changed:", category=model_type.lower(), force=True)
-    for change in config_changes:
-        debug.log(f"{change}", category=model_type.lower(), force=True, indent_level=1)
+    if debug:
+        debug.log(f"{model_type} configuration changed:", category=model_type.lower(), force=True)
+        for change in config_changes:
+            debug.log(f"{change}", category=model_type.lower(), force=True, indent_level=1)
     
     # Handle torch.compile unwrapping if needed
     if changes_detected.get('torch_compile', False):
-        if model_attr == 'dit' and hasattr(model, '_orig_mod'):
-            debug.log(f"Removing torch.compile from {model_type}", category="setup")
-            model = model._orig_mod
-            setattr(runner, model_attr, model)
-        elif model_attr == 'vae':
-            # Unwrap compiled VAE submodules if present
-            if hasattr(model, 'encoder') and hasattr(model.encoder, '_orig_mod'):
-                debug.log(f"Removing torch.compile from {model_type} encoder", category="setup")
-                model.encoder = model.encoder._orig_mod
-            if hasattr(model, 'decoder') and hasattr(model.decoder, '_orig_mod'):
-                debug.log(f"Removing torch.compile from {model_type} decoder", category="setup")
-                model.decoder = model.decoder._orig_mod
+        model = _unwrap_compiled_model(model, model_attr, model_type, runner, debug)
     
     # Execute special handlers for config-specific logic
     if special_handlers:
@@ -359,19 +421,9 @@ def _update_model_config(
                 handler(runner, cached_config_attrs[config_name], 
                        new_configs[config_name], debug)
     
-    # Update config attributes
+    # Update config attributes on runner and model
     setattr(runner, model_attr, model)
-    for config_name, attr_name in cached_config_attrs.items():
-        setattr(runner, attr_name, new_configs.get(config_name))
-    
-    # Store on model so config travels with the model when cached
-    for config_name, attr_name in cached_config_attrs.items():
-        # Use explicit mapping if provided, otherwise derive from config name
-        if model_config_attrs and config_name in model_config_attrs:
-            model_attr_name = model_config_attrs[config_name]
-        else:
-            model_attr_name = f'_config_{config_name.split("_")[-1]}'
-        setattr(model, model_attr_name, new_configs.get(config_name))
+    _sync_model_config_attributes(runner, model, new_configs, cached_config_attrs, model_config_attrs)
     
     # Mark that configs need to be applied
     config_needs_app_attr = f'_{model_attr}_config_needs_application'
