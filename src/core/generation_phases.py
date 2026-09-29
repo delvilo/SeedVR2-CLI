@@ -25,7 +25,6 @@ Key Features:
 
 from .context import GenerationContext
 
-import os
 import sys
 import torch
 from typing import Dict, List, Optional, Tuple, Any, Callable
