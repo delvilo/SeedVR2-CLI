@@ -378,9 +378,9 @@ def repeat_concat_idx(
     txt_idx_splits = _tensor_split(txt_idx, txt_len, dim=0)
     
     tgt_idx_list = []
-    for i in range(len(vid_len)):
+    for i, v_split in enumerate(vid_idx_splits):
         # Add video window
-        tgt_idx_list.append(vid_idx_splits[i])
+        tgt_idx_list.append(v_split)
         
         # Add corresponding text (with repeat)
         batch_idx = i % batch_size
