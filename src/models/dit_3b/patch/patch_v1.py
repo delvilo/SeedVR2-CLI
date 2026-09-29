@@ -118,10 +118,11 @@ class NaPatchOut(PatchOut):
         )
         if not (t == h == w == 1):
             vid = na.unflatten(vid, vid_shape)
-            for i in range(len(vid)):
-                vid[i] = rearrange(vid[i], "T H W (t h w c) -> (T t) (H h) (W w) c", t=t, h=h, w=w)
+            for i, v in enumerate(vid):
+                v = rearrange(v, "T H W (t h w c) -> (T t) (H h) (W w) c", t=t, h=h, w=w)
                 if t > 1 and vid_shape_before_patchify[i, 0] % t != 0:
-                    vid[i] = vid[i][(t - vid_shape_before_patchify[i, 0] % t) :]
+                    v = v[(t - vid_shape_before_patchify[i, 0] % t) :]
+                vid[i] = v
             vid, vid_shape = na.flatten(vid)
 
         return vid, vid_shape
