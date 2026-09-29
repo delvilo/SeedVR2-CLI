@@ -61,7 +61,7 @@ from ..config import BlockSwapConfig, CompileConfig
 import os
 import torch
 from omegaconf import OmegaConf
-from typing import Dict, Any, Optional, Tuple, Union, Callable
+from typing import Dict, Any, Optional, Tuple, Union, Callable, List
 
 from .model_loader import (
     prepare_model_structure,
