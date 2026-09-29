@@ -48,6 +48,8 @@ Standard Loading:
 This module is used by model_configuration for weight loading during materialization.
 """
 
+from ..config import BlockSwapConfig
+
 import os
 import torch
 from omegaconf import OmegaConf
@@ -399,7 +401,7 @@ def prepare_model_structure(
     checkpoint_path: str,
     config: OmegaConf,
     debug: 'Debug',
-    block_swap_config: Optional[Dict[str, Any]] = None
+    block_swap_config: Optional[BlockSwapConfig] = None
 ) -> VideoDiffusionInfer:
     """
     Prepare model structure on meta device without loading weights.

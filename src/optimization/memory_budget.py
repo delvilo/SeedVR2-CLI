@@ -4,7 +4,8 @@ Estimates are planning hints, not allocator limits. CUDA kernels and codecs have
 workspace costs that must also be measured on the target runtime.
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from ..config import InferenceConfig, VideoConfig, TileConfig, OffloadConfig
 from pathlib import Path
 import math
 
@@ -89,27 +90,19 @@ def is_oom(error):
         for text in ('out of memory', 'cannot allocate memory', 'allocation on device')))
 
 
-def reduce_workload(args):
-    """Change execution granularity only; preserve resolution and random seed."""
-    old = (args.batch_size, args.chunk_size, args.vae_encode_tiled,
-           args.vae_decode_tiled, args.vae_encode_tile_size, args.vae_decode_tile_size,
-           args.dit_offload_device, args.vae_offload_device, args.tensor_offload_device,
-           args.cache_dit, args.cache_vae, args.blocks_to_swap)
-    args.vae_encode_tiled = args.vae_decode_tiled = True
-    args.vae_encode_tile_size = max(128, args.vae_encode_tile_size // 2 // 64 * 64)
-    args.vae_decode_tile_size = max(128, args.vae_decode_tile_size // 2 // 64 * 64)
-    args.vae_encode_tile_overlap = min(args.vae_encode_tile_overlap, args.vae_encode_tile_size // 4)
-    args.vae_decode_tile_overlap = min(args.vae_decode_tile_overlap, args.vae_decode_tile_size // 4)
-    args.batch_size = max(1, ((args.batch_size - 1) // 8) * 4 + 1)
-    args.chunk_size = max(1, (args.chunk_size or 33) // 2)
-    args.temporal_overlap = min(args.temporal_overlap, args.batch_size - 1)
-    args.dit_offload_device = args.vae_offload_device = 'cpu'
-    args.tensor_offload_device = 'cpu'
-    args.cache_dit = args.cache_vae = False
-    blocks = 36 if '7b' in args.dit_model else 32
-    args.blocks_to_swap = min(blocks, max(args.blocks_to_swap + 4, blocks // 2))
-    new = (args.batch_size, args.chunk_size, args.vae_encode_tiled,
-           args.vae_decode_tiled, args.vae_encode_tile_size, args.vae_decode_tile_size,
-           args.dit_offload_device, args.vae_offload_device, args.tensor_offload_device,
-           args.cache_dit, args.cache_vae, args.blocks_to_swap)
-    return old != new
+def reduce_workload(config: InferenceConfig, video: VideoConfig) -> tuple[InferenceConfig, VideoConfig] | None:
+    """Return a reduced execution plan; never mutate the user's settings."""
+    def reduce_tile(tile: TileConfig) -> TileConfig:
+        size = max(128, tile.size // 2 // 64 * 64)
+        return replace(tile, enabled=True, size=size, overlap=min(tile.overlap, size // 4))
+
+    batch = max(1, ((config.sampling.batch_size - 1) // 8) * 4 + 1)
+    blocks = 36 if '7b' in config.model.dit_model else 32
+    reduced = replace(config,
+        sampling=replace(config.sampling, batch_size=batch,
+                         temporal_overlap=min(config.sampling.temporal_overlap, batch - 1)),
+        vae=replace(config.vae, encode=reduce_tile(config.vae.encode), decode=reduce_tile(config.vae.decode)),
+        offload=OffloadConfig(), cache=replace(config.cache, dit=False, vae=False),
+        swap=replace(config.swap, blocks_to_swap=min(blocks, max(config.swap.blocks_to_swap + 4, blocks // 2))))
+    window = replace(video, chunk_size=max(1, (video.chunk_size or 33) // 2))
+    return (reduced, window) if (reduced, window) != (config, video) else None

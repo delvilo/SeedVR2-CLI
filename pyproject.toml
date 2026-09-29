@@ -30,3 +30,11 @@ dependencies = [
 Repository = "https://github.com/delvilo/SeedVR2Lite_VideoUpscaler"
 Documentation = "https://github.com/delvilo/SeedVR2Lite_VideoUpscaler#readme"
 "Bug Tracker" = "https://github.com/delvilo/SeedVR2Lite_VideoUpscaler/issues"
+
+[tool.mypy]
+follow_imports = "silent"
+files = [
+    "src/config.py", "src/cli", "src/media", "src/core/context.py",
+    "src/core/pipeline.py", "src/core/planning.py", "src/core/scheduler.py",
+    "src/core/session.py", "src/optimization/memory_budget.py"
+]

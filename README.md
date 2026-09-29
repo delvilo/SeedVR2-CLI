@@ -72,7 +72,9 @@ See [memory behavior, measured buffer baseline and Colab validation](docs/memory
 
 ## Development checks
 
-Install `requirements-dev.txt`, then run `python -m compileall -q inference_cli.py src tests tools`, `python -m pytest -q tests`, and `python tools/benchmark_memory.py`. The CPU CI workflow uses Python 3.13 / PyTorch 2.11 and checks that streaming output buffers remain bounded as clip length grows. The Colab notebook's short video sample checks the full inference path on the target GPU runtime.
+The CLI, media I/O, scheduler and inference session have separate modules and immutable typed settings. See [architecture and ownership](docs/architecture.md) for the module boundaries and failure lifecycle.
+
+Install `requirements-dev.txt`, then run `python -m compileall -q inference_cli.py src tests tools`, `python -m mypy`, `python -m pytest -q tests`, and `python tools/benchmark_memory.py`. The CPU CI workflow uses Python 3.13 / PyTorch 2.11 and checks that streaming output buffers remain bounded as clip length grows. The Colab notebook's short video sample checks the full inference path on the target GPU runtime.
 
 ## Models and attribution
 

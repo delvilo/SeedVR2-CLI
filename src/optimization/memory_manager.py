@@ -5,6 +5,8 @@ Handles VRAM usage, cache management, and memory optimization
 Extracted from: seedvr2.py (lines 373-405, 607-626, 1016-1044)
 """
 
+from ..core.context import GenerationContext
+
 import torch
 import gc
 import time
@@ -383,21 +385,21 @@ def release_text_embeddings(*embeddings: torch.Tensor, debug: Optional['Debug'] 
                 debug.log(f"Cleaned up {names[i]}", category="cleanup")
 
 
-def cleanup_text_embeddings(ctx: Dict[str, Any], debug: Optional['Debug'] = None) -> None:
+def cleanup_text_embeddings(ctx: GenerationContext, debug: Optional['Debug'] = None) -> None:
     """
-    Clean up text embeddings from a context dictionary.
+    Clean up text embeddings from invocation state.
     Extracts embeddings, releases memory, and clears the context entry.
     
     Args:
-        ctx: Context dictionary potentially containing 'text_embeds'
+        ctx: GenerationContext potentially containing 'text_embeds'
         debug: Optional debug instance for logging
     """
-    if not ctx or not ctx.get('text_embeds'):
+    if not ctx or not ctx.text_embeds:
         return
     
     embeddings = []
     names = []
-    for key, embeds_list in ctx['text_embeds'].items():
+    for key, embeds_list in ctx.text_embeds.items():
         if embeds_list:
             embeddings.extend(embeds_list)
             names.append(key)
@@ -408,7 +410,7 @@ def cleanup_text_embeddings(ctx: Dict[str, Any], debug: Optional['Debug'] = None
         if debug:
             debug.log(f"Cleaned up text embeddings: {', '.join(names)}", category="cleanup")
     
-    ctx['text_embeds'] = None
+    ctx.text_embeds = None
 
     
 def release_model_memory(model: Optional[torch.nn.Module], debug=None) -> None:
