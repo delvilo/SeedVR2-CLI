@@ -143,10 +143,61 @@ def get_module_memory_mb(module: torch.nn.Module) -> float:
     return total_bytes / (1024 * 1024)
 
 
+def _resolve_debug(runner: 'VideoDiffusionInfer', debug: Optional['Debug']) -> 'Debug':
+    if debug is not None:
+        return debug
+    if hasattr(runner, 'debug') and runner.debug is not None:
+        return runner.debug
+    raise ValueError("Debug instance must be provided to apply_block_swap_to_dit")
+
+
+def _extract_actual_model(runner: 'VideoDiffusionInfer') -> torch.nn.Module:
+    model = runner.dit
+    if hasattr(model, "dit_model"):
+        model = model.dit_model
+    return model
+
+
+def _determine_devices(runner: 'VideoDiffusionInfer', block_swap_config: BlockSwapConfig):
+    if hasattr(runner, '_dit_device'):
+        device = runner._dit_device
+    else:
+        device = get_device()
+    offload_device = block_swap_config.offload_device
+    return device, offload_device
+
+
+def _log_blockswap_config(
+    effective_blocks: int,
+    total_blocks: int,
+    swap_io_components: bool,
+    offload_device: Any,
+    debug: 'Debug'
+) -> None:
+    block_text = "block" if effective_blocks <= 1 else "blocks"
+    if effective_blocks > 0 and swap_io_components:
+        debug.log(f"BlockSwap: {effective_blocks}/{total_blocks} transformer {block_text} + I/O components offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
+    elif effective_blocks > 0:
+        debug.log(f"BlockSwap: {effective_blocks}/{total_blocks} transformer {block_text} offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
+    elif swap_io_components:
+        debug.log(f"BlockSwap: I/O components offloaded to {str(offload_device).upper()} (0/{total_blocks} blocks swapped)", category="blockswap", force=True)
+
+
+def _wrap_enabled_blocks(
+    model: torch.nn.Module,
+    blocks_to_swap: int,
+    debug: 'Debug'
+) -> None:
+    if blocks_to_swap > 0:
+        for b, block in enumerate(model.blocks):
+            if b <= model.blocks_to_swap:
+                _wrap_block_forward(block, b, model, debug)
+
+
 def apply_block_swap_to_dit(
     runner: 'VideoDiffusionInfer',
     block_swap_config: BlockSwapConfig,
-    debug: 'Debug'
+    debug: Optional['Debug'] = None
 ) -> None:
     """
     Apply block swapping configuration to a DiT model with OOM protection.
@@ -162,7 +213,7 @@ def apply_block_swap_to_dit(
             - swap_io_components: Whether to offload I/O components  
             - enable_debug: Whether to enable debug logging
             - offload_device: Device to offload to (default: 'cpu')
-        debug: Debug instance for logging (required)
+        debug: Debug instance for logging (optional, falls back to runner.debug)
     """
     # Early return if BlockSwap not enabled
     if not is_blockswap_enabled(block_swap_config):
@@ -175,25 +226,14 @@ def apply_block_swap_to_dit(
     if blocks_to_swap <= 0 and not swap_io_components:
         return
     
-    if debug is None:
-        if hasattr(runner, 'debug') and runner.debug is not None:
-            debug = runner.debug
-        else:
-            raise ValueError("Debug instance must be provided to apply_block_swap_to_dit")
-    
+    debug = _resolve_debug(runner, debug)
     debug.start_timer("apply_blockswap")
 
     # Get the actual model (handle CompatibleDiT wrapper)
-    model = runner.dit
-    if hasattr(model, "dit_model"):
-        model = model.dit_model
+    model = _extract_actual_model(runner)
     
     # Determine devices
-    if hasattr(runner, '_dit_device'):
-        device = runner._dit_device
-    else:
-        device = get_device()
-    offload_device = block_swap_config.offload_device
+    device, offload_device = _determine_devices(runner, block_swap_config)
 
     # Validate model structure
     if not hasattr(model, "blocks"):
@@ -206,13 +246,7 @@ def apply_block_swap_to_dit(
     effective_blocks = min(blocks_to_swap, total_blocks) if blocks_to_swap > 0 else 0
     
     # Log configuration clearly based on what's enabled
-    block_text = "block" if effective_blocks <= 1 else "blocks"
-    if effective_blocks > 0 and swap_io_components:
-        debug.log(f"BlockSwap: {effective_blocks}/{total_blocks} transformer {block_text} + I/O components offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
-    elif effective_blocks > 0:
-        debug.log(f"BlockSwap: {effective_blocks}/{total_blocks} transformer {block_text} offloaded to {str(offload_device).upper()}", category="blockswap", force=True)
-    elif swap_io_components:
-        debug.log(f"BlockSwap: I/O components offloaded to {str(offload_device).upper()} (0/{total_blocks} blocks swapped)", category="blockswap", force=True)
+    _log_blockswap_config(effective_blocks, total_blocks, swap_io_components, offload_device, debug)
     
     # Configure model with blockswap attributes
     if blocks_to_swap > 0:
@@ -238,10 +272,7 @@ def apply_block_swap_to_dit(
                        debug)
     
     # Wrap block forward methods for dynamic swapping (only if blocks_to_swap > 0)
-    if blocks_to_swap > 0:
-        for b, block in enumerate(model.blocks):
-            if b <= model.blocks_to_swap:
-                _wrap_block_forward(block, b, model, debug)
+    _wrap_enabled_blocks(model, blocks_to_swap, debug)
 
     # Patch RoPE modules for robust error handling
     _patch_rope_for_blockswap(model, debug)
@@ -265,7 +296,7 @@ def apply_block_swap_to_dit(
 
     debug.log("BlockSwap configuration complete", category="success")
     debug.end_timer("apply_blockswap", "BlockSwap configuration application")
-    
+
 
 def _configure_io_components(
     model: torch.nn.Module,
