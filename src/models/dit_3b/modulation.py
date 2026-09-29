@@ -53,6 +53,7 @@ class AdaSingle(nn.Module):
         self.dim = dim
         self.emb_dim = emb_dim
         self.layers = layers
+        self.layer_indices = {layer: i for i, layer in enumerate(layers)}
         for l in layers:
             if "in" in modes:
                 self.register_parameter(f"{l}_shift", nn.Parameter(torch.randn(dim) / dim**0.5))
@@ -72,8 +73,10 @@ class AdaSingle(nn.Module):
         branch_tag: str = "",
         hid_len: Optional[torch.LongTensor] = None,  # b
     ) -> torch.FloatTensor:
-        idx = self.layers.index(layer)
-        emb = rearrange(emb, "b (d l g) -> b d l g", l=len(self.layers), g=3)[..., idx, :]
+        # ⚡ Bolt optimization: Use pre-computed O(1) index lookup and native PyTorch
+        # reshape to avoid O(N) list search and einops parsing overhead per forward step.
+        idx = self.layer_indices[layer]
+        emb = emb.reshape(emb.shape[0], -1, len(self.layers), 3)[..., idx, :]
         emb = expand_dims(emb, 1, hid.ndim + 1)
 
         if hid_len is not None:
