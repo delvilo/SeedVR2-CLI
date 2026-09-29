@@ -631,9 +631,9 @@ class Decoder3D(nn.Module):
         # up
         reversed_block_out_channels = list(reversed(block_out_channels))
         output_channel = reversed_block_out_channels[0]
-        for i in range(len(reversed_block_out_channels)):
+        for i, ch in enumerate(reversed_block_out_channels):
             prev_output_channel = output_channel
-            output_channel = reversed_block_out_channels[i]
+            output_channel = ch
 
             is_final_block = i == len(block_out_channels) - 1
             is_temporal_up_block = i < self.temporal_up_num
