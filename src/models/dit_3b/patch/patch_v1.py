@@ -85,10 +85,10 @@ class NaPatchIn(PatchIn):
         t, h, w = self.patch_size
         if not (t == h == w == 1):
             vid = na.unflatten(vid, vid_shape)
-            for i in range(len(vid)):
+            for i, vid_i in enumerate(vid):
                 if t > 1 and vid_shape_before_patchify[i, 0] % t != 0:
-                    vid[i] = torch.cat([vid[i][:1]] * (t - vid[i].size(0) % t) + [vid[i]], dim=0)
-                vid[i] = rearrange(vid[i], "(T t) (H h) (W w) c -> T H W (t h w c)", t=t, h=h, w=w)
+                    vid_i = torch.cat([vid_i[:1]] * (t - vid_i.size(0) % t) + [vid_i], dim=0)
+                vid[i] = rearrange(vid_i, "(T t) (H h) (W w) c -> T H W (t h w c)", t=t, h=h, w=w)
             vid, vid_shape = na.flatten(vid)
 
         # slice vid after patching in when using sequence parallelism
@@ -118,10 +118,11 @@ class NaPatchOut(PatchOut):
         )
         if not (t == h == w == 1):
             vid = na.unflatten(vid, vid_shape)
-            for i in range(len(vid)):
-                vid[i] = rearrange(vid[i], "T H W (t h w c) -> (T t) (H h) (W w) c", t=t, h=h, w=w)
+            for i, vid_i in enumerate(vid):
+                vid_i = rearrange(vid_i, "T H W (t h w c) -> (T t) (H h) (W w) c", t=t, h=h, w=w)
                 if t > 1 and vid_shape_before_patchify[i, 0] % t != 0:
-                    vid[i] = vid[i][(t - vid_shape_before_patchify[i, 0] % t) :]
+                    vid_i = vid_i[(t - vid_shape_before_patchify[i, 0] % t) :]
+                vid[i] = vid_i
             vid, vid_shape = na.flatten(vid)
 
         return vid, vid_shape
