@@ -131,9 +131,9 @@ class Upsample3D(Upsample2D):
         else:
             hidden_states = [hidden_states]
 
-        for i in range(len(hidden_states)):
+        for i, hidden_state in enumerate(hidden_states):
             def upscale_and_rearrange():
-                temp = self.upscale_conv(hidden_states[i])
+                temp = self.upscale_conv(hidden_state)
                 return rearrange(
                     temp,
                     "b (x y z c) f h w -> b c (f z) (h x) (w y)",
