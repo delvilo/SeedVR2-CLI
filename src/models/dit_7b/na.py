@@ -378,9 +378,9 @@ def repeat_concat_idx(
     txt_idx_splits = _tensor_split(txt_idx, txt_len, dim=0)
     
     tgt_idx_list = []
-    for i in range(len(vid_len)):
+    for i, vid_split in enumerate(vid_idx_splits):
         # Add video window
-        tgt_idx_list.append(vid_idx_splits[i])
+        tgt_idx_list.append(vid_split)
         
         # Add corresponding text (with repeat)
         batch_idx = i % batch_size
@@ -512,7 +512,7 @@ def repeat(
     
     # Build kwargs for each batch element
     repeated = []
-    for i in range(len(unflattened)):
+    for i, elem in enumerate(unflattened):
         # Extract values for einops (requires Python int)
         batch_kwargs = {}
         for k, v in kwargs.items():
@@ -521,7 +521,7 @@ def repeat(
                 batch_kwargs[k] = int(v[i].item())
             else:
                 batch_kwargs[k] = v
-        repeated.append(einops.repeat(unflattened[i], pattern, **batch_kwargs))
+        repeated.append(einops.repeat(elem, pattern, **batch_kwargs))
     
     return flatten(repeated)
 
