@@ -354,7 +354,6 @@ class DownEncoderBlock3D(nn.Module):
 
         self.downsamplers = None
         if add_downsample:
-            # Todo: Refactor this line before V5 Image VAE Training.
             self.downsamplers = nn.ModuleList(
                 [
                     Downsample3D(
@@ -412,7 +411,6 @@ class UpDecoderBlock3D(nn.Module):
         self.resnets = nn.ModuleList(resnets)
 
         self.upsamplers = None
-        # Todo: Refactor this line before V5 Image VAE Training.
         if add_upsample:
             self.upsamplers = nn.ModuleList(
                 [
