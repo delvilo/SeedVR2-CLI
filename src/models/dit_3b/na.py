@@ -512,7 +512,7 @@ def repeat(
     
     # Build kwargs for each batch element
     repeated = []
-    for i in range(len(unflattened)):
+    for i, elem in enumerate(unflattened):
         # Extract values for einops (requires Python int)
         batch_kwargs = {}
         for k, v in kwargs.items():
@@ -521,7 +521,7 @@ def repeat(
                 batch_kwargs[k] = int(v[i].item())
             else:
                 batch_kwargs[k] = v
-        repeated.append(einops.repeat(unflattened[i], pattern, **batch_kwargs))
+        repeated.append(einops.repeat(elem, pattern, **batch_kwargs))
     
     return flatten(repeated)
 
