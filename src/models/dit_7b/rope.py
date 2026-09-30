@@ -15,7 +15,6 @@
 from functools import lru_cache
 from typing import Tuple
 import torch
-from einops import rearrange
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from torch import nn
 
@@ -61,12 +60,15 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
     ]:
         T, H, W = size
         freqs = self.get_axial_freqs(T, H, W)
-        q = rearrange(q, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
-        k = rearrange(k, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
+        # ⚡ Bolt optimization: Use native PyTorch reshape and flatten to avoid
+        # einops parsing overhead per forward call in hot RoPE execution path.
+        b, h = q.shape[:2]
+        q = q.reshape(b, h, T, H, W, -1)
+        k = k.reshape(b, h, T, H, W, -1)
         q = apply_rotary_emb(freqs, q)
         k = apply_rotary_emb(freqs, k)
-        q = rearrange(q, "b h T H W d -> b h (T H W) d")
-        k = rearrange(k, "b h T H W d -> b h (T H W) d")
+        q = q.flatten(2, 4)
+        k = k.flatten(2, 4)
         return q, k
 
 
@@ -83,12 +85,14 @@ class NaRotaryEmbedding3d(RotaryEmbedding3d):
     ]:
         freqs = cache("rope_freqs_3d", lambda: self.get_freqs(shape))
         freqs = freqs.to(device=q.device, dtype=q.dtype)
-        q = rearrange(q, "L h d -> h L d")
-        k = rearrange(k, "L h d -> h L d")
+        # ⚡ Bolt optimization: Use native PyTorch .transpose(0, 1) instead of
+        # einops.rearrange to eliminate string parsing overhead per forward call.
+        q = q.transpose(0, 1)
+        k = k.transpose(0, 1)
         q = apply_rotary_emb(freqs, q.float()).to(q.dtype)
         k = apply_rotary_emb(freqs, k.float()).to(k.dtype)
-        q = rearrange(q, "h L d -> L h d")
-        k = rearrange(k, "h L d -> L h d")
+        q = q.transpose(0, 1)
+        k = k.transpose(0, 1)
         return q, k
 
     @torch._dynamo.disable  # Disable compilation: shape.tolist() is data-dependent and causes graph breaks
