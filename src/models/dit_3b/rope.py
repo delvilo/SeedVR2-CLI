@@ -15,7 +15,6 @@
 from functools import lru_cache
 from typing import Optional, Tuple
 import torch
-from einops import rearrange
 from rotary_embedding_torch import RotaryEmbedding, apply_rotary_emb
 from torch import nn
 
@@ -62,12 +61,14 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
     ]:
         T, H, W = size
         freqs = self.get_axial_freqs(T, H, W)
-        q = rearrange(q, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
-        k = rearrange(k, "b h (T H W) d -> b h T H W d", T=T, H=H, W=W)
+        # ⚡ Bolt optimization: Use native PyTorch reshape instead of einops rearrange to eliminate string parsing overhead.
+        b, h, _, d = q.shape
+        q = q.reshape(b, h, T, H, W, d)
+        k = k.reshape(b, h, T, H, W, d)
         q = apply_rotary_emb(freqs, q.float()).to(q.dtype)
         k = apply_rotary_emb(freqs, k.float()).to(k.dtype)
-        q = rearrange(q, "b h T H W d -> b h (T H W) d")
-        k = rearrange(k, "b h T H W d -> b h (T H W) d")
+        q = q.reshape(b, h, -1, d)
+        k = k.reshape(b, h, -1, d)
         return q, k
 
 
@@ -113,19 +114,20 @@ class NaMMRotaryEmbedding3d(MMRotaryEmbeddingBase):
             vid_freqs = vid_freqs.to(target_device)
         if txt_freqs.device != target_device:
             txt_freqs = txt_freqs.to(target_device)
-        vid_q = rearrange(vid_q, "L h d -> h L d")
-        vid_k = rearrange(vid_k, "L h d -> h L d")
+        # ⚡ Bolt optimization: Use native PyTorch transpose(0, 1) instead of einops rearrange to eliminate string parsing overhead.
+        vid_q = vid_q.transpose(0, 1)
+        vid_k = vid_k.transpose(0, 1)
         vid_q = apply_rotary_emb(vid_freqs, vid_q.float()).to(vid_q.dtype)
         vid_k = apply_rotary_emb(vid_freqs, vid_k.float()).to(vid_k.dtype)
-        vid_q = rearrange(vid_q, "h L d -> L h d")
-        vid_k = rearrange(vid_k, "h L d -> L h d")
+        vid_q = vid_q.transpose(0, 1)
+        vid_k = vid_k.transpose(0, 1)
 
-        txt_q = rearrange(txt_q, "L h d -> h L d")
-        txt_k = rearrange(txt_k, "L h d -> h L d")
+        txt_q = txt_q.transpose(0, 1)
+        txt_k = txt_k.transpose(0, 1)
         txt_q = apply_rotary_emb(txt_freqs, txt_q.float()).to(txt_q.dtype)
         txt_k = apply_rotary_emb(txt_freqs, txt_k.float()).to(txt_k.dtype)
-        txt_q = rearrange(txt_q, "h L d -> L h d")
-        txt_k = rearrange(txt_k, "h L d -> L h d")
+        txt_q = txt_q.transpose(0, 1)
+        txt_k = txt_k.transpose(0, 1)
         return vid_q, vid_k, txt_q, txt_k
 
     @torch._dynamo.disable  # Disable compilation: .tolist() is data-dependent and causes graph breaks
