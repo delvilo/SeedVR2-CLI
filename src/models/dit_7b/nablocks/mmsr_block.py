@@ -105,8 +105,9 @@ class NaSwinAttention(MMWindowAttention):
         )
         vid_qkv_win = window_partition(vid_qkv)
 
-        vid_qkv_win = rearrange(vid_qkv_win, "l (o h d) -> l o h d", o=3, d=self.head_dim)
-        txt_qkv = rearrange(txt_qkv, "l (o h d) -> l o h d", o=3, d=self.head_dim)
+        # ⚡ Bolt optimization: Use native PyTorch reshape instead of einops rearrange to eliminate string parsing overhead.
+        vid_qkv_win = vid_qkv_win.reshape(vid_qkv_win.shape[0], 3, -1, self.head_dim)
+        txt_qkv = txt_qkv.reshape(txt_qkv.shape[0], 3, -1, self.head_dim)
 
         vid_q, vid_k, vid_v = vid_qkv_win.unbind(1)
         txt_q, txt_k, txt_v = txt_qkv.unbind(1)
@@ -145,8 +146,9 @@ class NaSwinAttention(MMWindowAttention):
         # text pooling
         vid_out, txt_out = unconcat_win(out)
 
-        vid_out = rearrange(vid_out, "l h d -> l (h d)")
-        txt_out = rearrange(txt_out, "l h d -> l (h d)")
+        # ⚡ Bolt optimization: Use native PyTorch flatten instead of einops rearrange to eliminate string parsing overhead.
+        vid_out = vid_out.flatten(1)
+        txt_out = txt_out.flatten(1)
         vid_out = window_reverse(vid_out)
 
         vid_out = gather_heads_scatter_seq(vid_out, head_dim=1, seq_dim=0)
