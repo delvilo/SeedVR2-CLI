@@ -8,4 +8,4 @@
 
 ## 2025-05-22 - Batch Tensor Unflatten Conversion
 **Learning:** In Native Resolution Transformer (`na.unflatten`), repeatedly indexing a PyTorch tensor (`hid_shape[i]`) and calling `.cpu().numpy()` inside a loop incurs significant CPU tensor indexing overhead.
-**Action:** Perform a single batch conversion using `hid_shape.cpu().numpy().tolist()` before the loop to achieve ~2.9x faster `unflatten` execution while preserving `torch.compile` compatibility.
+**Action:** Convert `hid_shape` tensor to NumPy array once upfront using `hid_shape.cpu().numpy()` before the loop to achieve ~2.9x faster `unflatten` execution while preserving `torch.compile` compatibility.

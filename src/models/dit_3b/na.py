@@ -130,13 +130,14 @@ def unflatten(
     hid_list = _tensor_split(hid, hid_len, dim=0)
     
     # Unflatten each piece
-    # ⚡ Bolt optimization: Convert hid_shape tensor to Python lists using a batch
-    # .cpu().numpy().tolist() conversion instead of doing per-element .cpu().numpy() in a loop.
+    # ⚡ Bolt optimization: Convert hid_shape tensor to NumPy array once upfront
+    # using hid_shape.cpu().numpy() instead of doing per-element .cpu().numpy() in a loop.
     # This retains full torch.compile compatibility while eliminating redundant per-element CPU tensor indexing overhead (~2.9x faster).
-    shapes = hid_shape.cpu().numpy().tolist()
+    hid_shape_np = hid_shape.cpu().numpy()
     result = []
     for i, x in enumerate(hid_list):
-        result.append(x.unflatten(0, shapes[i]))
+        target_shape = list(hid_shape_np[i])
+        result.append(x.unflatten(0, target_shape))
     
     return result
 
