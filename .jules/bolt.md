@@ -5,3 +5,7 @@
 ## 2025-05-21 - RoPE Tensor Rearrangement Optimization
 **Learning:** `RotaryEmbedding3d` and `NaRotaryEmbedding3d`/`NaMMRotaryEmbedding3d` inside `dit_3b/rope.py` and `dit_7b/rope.py` are executed in every transformer block and timestep. Using `einops.rearrange` string parsing in these inner loop functions causes measurable Python overhead (~3.7x-4.2x slower than native PyTorch view operations).
 **Action:** Replace `einops.rearrange` with native PyTorch `.reshape()` and `.transpose(0, 1)` in RoPE forward methods for ~4x faster tensor rearrangements without allocations.
+
+## 2025-05-22 - Batch Tensor Unflatten Conversion
+**Learning:** In Native Resolution Transformer (`na.unflatten`), repeatedly indexing a PyTorch tensor (`hid_shape[i]`) and calling `.cpu().numpy()` inside a loop incurs significant CPU tensor indexing overhead.
+**Action:** Perform a single batch conversion using `hid_shape.cpu().numpy().tolist()` before the loop to achieve ~2.9x faster `unflatten` execution while preserving `torch.compile` compatibility.
