@@ -61,6 +61,8 @@ class RotaryEmbedding3d(RotaryEmbeddingBase):
     ]:
         T, H, W = size
         freqs = self.get_axial_freqs(T, H, W)
+        if freqs.device != q.device:
+            freqs = freqs.to(q.device)
         # ⚡ Bolt optimization: Use native PyTorch reshape instead of einops rearrange to eliminate string parsing overhead.
         b, h, _, d = q.shape
         q = q.reshape(b, h, T, H, W, d)

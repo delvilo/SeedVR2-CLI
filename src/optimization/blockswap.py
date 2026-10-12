@@ -516,7 +516,13 @@ def _wrap_block_forward(
             t_start = _get_swap_start_time(debug, debug.enabled if debug else False)
 
             # Only move to GPU if necessary
-            current_device = next(self.parameters()).device
+            try:
+                current_device = next(self.parameters()).device
+            except StopIteration:
+                try:
+                    current_device = next(self.buffers()).device
+                except StopIteration:
+                    current_device = torch.device(getattr(model, 'offload_device', 'cpu'))
             target_device = torch.device(model.main_device)
             
             if current_device != target_device:
@@ -594,7 +600,13 @@ def _wrap_io_forward(
         t_start = _get_swap_start_time(debug, debug.enabled if debug else False)
         
         # Check current device to avoid unnecessary moves
-        current_device = next(self.parameters()).device
+        try:
+            current_device = next(self.parameters()).device
+        except StopIteration:
+            try:
+                current_device = next(self.buffers()).device
+            except StopIteration:
+                current_device = torch.device(getattr(model, 'offload_device', 'cpu'))
         target_device = torch.device(model.main_device)
         
         # Move to GPU for computation if needed
@@ -751,19 +763,29 @@ def _protect_model_from_move(
         model._original_to = model.to
         
         # Define the protected method without closures
-        def protected_model_to(self, device, *args, **kwargs):
+        def protected_model_to(self, *args, **kwargs):
             # Check if protection is temporarily bypassed for offloading
             # Flag is stored on model itself (not runner) to survive runner recreation
             if getattr(self, "_blockswap_bypass_protection", False):
-                # Protection bypassed, allow movement
                 if hasattr(self, '_original_to'):
-                    return self._original_to(device, *args, **kwargs)
-            
+                    return self._original_to(*args, **kwargs)
+
+            # Extract target device if specified
+            device = kwargs.get('device', None)
+            if device is None and len(args) > 0 and not isinstance(args[0], torch.dtype):
+                device = args[0]
+
+            # If no device movement is requested (e.g. dtype conversion only), allow it
+            if device is None:
+                if hasattr(self, '_original_to'):
+                    return self._original_to(*args, **kwargs)
+                return super(type(self), self).to(*args, **kwargs)
+
             # Get configured offload device directly from model
             blockswap_offload_device = "cpu"  # default
             if hasattr(self, "_block_swap_config"):
                 blockswap_offload_device = self._block_swap_config.get("offload_device", "cpu")
-            
+
             # Check if BlockSwap is currently active via runner weak reference
             runner_ref = getattr(self, '_blockswap_runner_ref', None)
             blockswap_is_active = False
@@ -771,7 +793,7 @@ def _protect_model_from_move(
                 runner_obj = runner_ref()
                 if runner_obj and hasattr(runner_obj, "_blockswap_active"):
                     blockswap_is_active = runner_obj._blockswap_active
-            
+
             # Block attempts to move model away from configured offload device when active
             if blockswap_is_active and str(device) != str(blockswap_offload_device):
                 # Get debug instance from runner if available
@@ -780,20 +802,20 @@ def _protect_model_from_move(
                     runner_obj = runner_ref()
                     if runner_obj and hasattr(runner_obj, 'debug'):
                         debug_instance = runner_obj.debug
-                
+
                 if debug_instance:
                     debug_instance.log(
                         f"Blocked attempt to move BlockSwap model from {blockswap_offload_device} to {device}",
                         level="WARNING", category="blockswap", force=True
                     )
                 return self
-            
+
             # Allow movement (either bypass is enabled or target is offload device)
             if hasattr(self, '_original_to'):
-                return self._original_to(device, *args, **kwargs)
+                return self._original_to(*args, **kwargs)
             else:
                 # Fallback - shouldn't happen
-                return super(type(self), self).to(device, *args, **kwargs)
+                return super(type(self), self).to(*args, **kwargs)
         
         # Bind as a method to the model instance
         model.to = types.MethodType(protected_model_to, model)

@@ -457,11 +457,12 @@ def _handle_blockswap_change(
     had_blockswap = is_blockswap_enabled(cached_config)
     has_blockswap = is_blockswap_enabled(new_config)
     
-    # If old config had BlockSwap features, clean them up first
-    if had_blockswap and not has_blockswap:
-        # Disabling BlockSwap completely
-        debug.log("Disabling BlockSwap completely", category="blockswap")
-        cleanup_blockswap(runner=runner, keep_state_for_cache=False)
+    # If old config had BlockSwap features, clean them up if disabling or changing configuration
+    if had_blockswap:
+        if not has_blockswap or cached_config != new_config:
+            if debug:
+                debug.log("Cleaning up previous BlockSwap configuration", category="blockswap")
+            cleanup_blockswap(runner=runner, keep_state_for_cache=False)
     
     # Mark as inactive so the new config can be applied
     runner._blockswap_active = False
@@ -1114,7 +1115,7 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
         
         # Apply torch.compile after BlockSwap (only if not already compiled)
         # Check: model has _orig_mod attribute means it's already torch.compiled
-        if hasattr(runner, '_dit_compile_args') and runner._dit_compile_args:
+        if hasattr(runner, '_dit_compile_args') and runner._dit_compile_args and getattr(runner._dit_compile_args, 'dit', True):
             if not hasattr(model, '_orig_mod'):
                 model = _apply_torch_compile(model, runner._dit_compile_args, "DiT", debug)
         
@@ -1148,7 +1149,7 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             debug.end_timer("vae_set_memory_limit", "VAE memory limits configured")
 
         # Apply torch.compile if configured (only if not already compiled)
-        if hasattr(runner, '_vae_compile_args') and runner._vae_compile_args:
+        if hasattr(runner, '_vae_compile_args') and runner._vae_compile_args and getattr(runner._vae_compile_args, 'vae', True):
             # Check if encoder/decoder already compiled (have _orig_mod)
             encoder_compiled = hasattr(model, 'encoder') and hasattr(model.encoder, '_orig_mod')
             decoder_compiled = hasattr(model, 'decoder') and hasattr(model.decoder, '_orig_mod')

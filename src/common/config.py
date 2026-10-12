@@ -17,6 +17,7 @@ Configuration utility functions
 """
 
 import importlib
+import torch
 from typing import Any, Callable, List, Union
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
@@ -125,10 +126,11 @@ def create_object(config: DictConfig) -> Any:
       args: as_config | as_params (default to as_config)
     """
     
-    item = import_item(
-        path=config.__object__.path,
-        name=config.__object__.name,
-    )
+    with torch.device("cpu"):
+        item = import_item(
+            path=config.__object__.path,
+            name=config.__object__.name,
+        )
     args = config.__object__.get("args", "as_config")
     if args == "as_config":
         return item(config)

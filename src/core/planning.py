@@ -20,7 +20,7 @@ def plan_file(config: AppConfig, width: int, height: int, device: str,
     sampling, cache = inference.sampling, inference.cache
     available = available_ram_bytes()
     ram = min(int(memory.ram_budget_gb * GIB), available) if memory.ram_budget_gb else int(available * .8)
-    free_vram = torch.cuda.mem_get_info(torch.device(device))[0] if torch.device(device).type == 'cuda' else 0
+    free_vram = torch.cuda.mem_get_info(torch.device(device))[0] if (torch.cuda.is_available() and torch.device(device).type == 'cuda') else 0
     vram = min(int(memory.vram_budget_gb * GIB), free_vram) if memory.vram_budget_gb else int(free_vram * .9)
     model_dir = Path(inference.model.model_dir or get_base_cache_dir())
     weights = [(model_dir / name).stat().st_size if (model_dir / name).is_file() else 0

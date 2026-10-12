@@ -70,6 +70,8 @@ class AdaSingle(nn.Module):
     ) -> torch.FloatTensor:
         # ⚡ Bolt optimization: Use pre-computed O(1) index lookup and native PyTorch
         # reshape to avoid O(N) list search and einops parsing overhead per forward step.
+        if not hasattr(self, "layer_indices"):
+            self.layer_indices = {l: i for i, l in enumerate(self.layers)}
         idx = self.layer_indices[layer]
         emb = emb.reshape(emb.shape[0], -1, len(self.layers), 3)[..., idx, :]
         emb = expand_dims(emb, 1, hid.ndim + 1)

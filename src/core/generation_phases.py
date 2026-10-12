@@ -27,7 +27,7 @@ from .context import GenerationContext
 
 import sys
 import torch
-from typing import Optional, Callable
+from typing import Dict, List, Optional, Tuple, Any, Callable
 
 from .generation_utils import (
     setup_video_transform,
@@ -904,7 +904,7 @@ def decode_all_batches(
             del samples
             
             # Get original length for this batch (before any padding was added)
-            ori_length = ctx.all_ori_lengths[decode_idx] if decode_idx < len(ctx.all_ori_lengths) else sample.shape[0]
+            ori_length = ctx.all_ori_lengths[batch_idx] if ctx.all_ori_lengths is not None and batch_idx < len(ctx.all_ori_lengths) else sample.shape[0]
             
             # Trim temporal padding: sample is in [T, C, H, W] format after rearrange
             if ori_length < sample.shape[0]:
@@ -974,7 +974,7 @@ def decode_all_batches(
                 ctx.final_video[write_start:write_end] = sample
             
             # Store batch info for Phase 4 processing
-            ctx.decode_batch_info.append((write_start, write_end, decode_idx, ori_length))
+            ctx.decode_batch_info.append((write_start, write_end, batch_idx, ori_length))
             current_write_idx = write_end
             
             debug.log(f"Wrote {batch_frames} frames to positions {write_start}-{write_end}", 

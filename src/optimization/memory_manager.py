@@ -528,9 +528,10 @@ def manage_model_device(model: torch.nn.Module, target_device: torch.device, mod
     Returns:
         bool: True if model was moved, False if already on target device
     """
-    if model is None:
+    if model is None or target_device is None:
         return False
-    
+    if isinstance(target_device, str):
+        target_device = torch.device(target_device)
     # Check if this is a BlockSwap-enabled DiT model
     is_blockswap_model = False
     actual_model = model

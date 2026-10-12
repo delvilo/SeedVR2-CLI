@@ -189,7 +189,8 @@ def detect_edges_batch(
 
 
 def guided_filter_pytorch(guide: torch.Tensor, src: torch.Tensor, 
-                          radius: int = 8, eps: float = 0.01) -> torch.Tensor:
+                          radius: int = 8, eps: float = 0.01,
+                          debug: Optional['Debug'] = None) -> torch.Tensor:
     """
     Apply guided filter for edge-preserving smoothing.
     
@@ -354,7 +355,8 @@ def edge_guided_alpha_upscale(
             guide=rgb_normalized,
             src=alpha_upscaled,
             radius=2,  # Reduced from 3 for tighter edges
-            eps=0.002
+            eps=0.002,
+            debug=debug
         )
         
         # Step 3: Create tight transition zone using 3x3 max pooling on edge map
@@ -409,7 +411,8 @@ def edge_guided_alpha_upscale(
             guide=rgb_normalized,
             src=alpha_final,
             radius=3,
-            eps=0.002
+            eps=0.002,
+            debug=debug
         )
     
    # Clamp output to valid alpha range [0, 1]

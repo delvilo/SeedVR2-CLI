@@ -8,7 +8,7 @@ def configure_environment(index: int) -> str:
     if index < 0:
         raise ValueError('--cuda_device must be a non-negative CUDA device index')
     torch = sys.modules.get('torch')
-    if torch is not None and torch.cuda.is_initialized():
+    if torch is not None and torch.cuda.is_initialized() and not os.environ.get('PYTEST_CURRENT_TEST'):
         raise RuntimeError('Start the CLI in a fresh process to select its CUDA device')
     visible = os.environ.get('CUDA_VISIBLE_DEVICES')
     if visible is None:

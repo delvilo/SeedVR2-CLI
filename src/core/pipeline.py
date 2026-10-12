@@ -23,10 +23,14 @@ if TYPE_CHECKING:
     from .session import InferenceSession
 
 
-def parse_offload_device(value: str, cache_enabled: bool = False) -> str | None:
-    if value == "none":
+def parse_offload_device(value: str | None, cache_enabled: bool = False) -> str | None:
+    if value is None or value == "none":
         return "cpu" if cache_enabled else None
-    return value if value == "cpu" or ":" in value else f"cuda:{value}"
+    if value in ("cpu", "cuda") or ":" in value:
+        return value
+    if value.isdigit():
+        return f"cuda:{value}"
+    return value
 
 
 def iter_processed_batches(

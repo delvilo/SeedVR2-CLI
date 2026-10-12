@@ -341,19 +341,19 @@ def setup_generation_context(
         GenerationContext: Invocation state with torch.device objects
     """
     # Normalize devices to torch.device objects (follows PyTorch convention)
-    def _normalize_device(device_spec: Optional[Union[str, torch.device]]) -> torch.device:
+    def _normalize_device(device_spec: Optional[Union[str, torch.device]]) -> Optional[torch.device]:
         """Convert device specification to torch.device object."""
-        if device_spec is None:
-            return torch.device("cpu")
+        if device_spec is None or device_spec == 'none':
+            return None
         if isinstance(device_spec, torch.device):
             return device_spec
         return torch.device(device_spec)
     
-    dit_device = _normalize_device(dit_device)
-    vae_device = _normalize_device(vae_device)
-    dit_offload_device = _normalize_device(dit_offload_device) if dit_offload_device is not None else None
-    vae_offload_device = _normalize_device(vae_offload_device) if vae_offload_device is not None else None
-    tensor_offload_device = _normalize_device(tensor_offload_device) if tensor_offload_device is not None else None
+    dit_device = _normalize_device(dit_device) or torch.device("cpu")
+    vae_device = _normalize_device(vae_device) or torch.device("cpu")
+    dit_offload_device = _normalize_device(dit_offload_device)
+    vae_offload_device = _normalize_device(vae_offload_device)
+    tensor_offload_device = _normalize_device(tensor_offload_device)
     
     # Set LOCAL_RANK to 0 for single-GPU inference mode
     # The CLI may restrict visibility to the selected CUDA device before importing torch.

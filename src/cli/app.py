@@ -41,7 +41,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not download_weight(dit_model=model.dit_model, vae_model=DEFAULT_VAE,
                                model_dir=model.model_dir, debug=debug):
             raise RuntimeError('Failed to download required models. Check console output above.')
-        count = run_jobs(config, 'cuda:0', debug)
+        import torch
+        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        count = run_jobs(config, device, debug)
         elapsed = time.monotonic() - started
         debug.log(f'All upscaling processes completed successfully in {elapsed:.2f}s', category='success', force=True)
         if count and elapsed > 0:
