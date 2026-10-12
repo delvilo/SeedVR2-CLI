@@ -33,6 +33,7 @@ VAE tiling and CPU model offload are enabled by default. `--no-vae_encode_tiled`
 | `--cache_vram_gb` | GPU model cache cap, limited to half the VRAM allowance. Default 0. Select a CUDA offload target explicitly if GPU retention is wanted. |
 | `--memory_report path.jsonl` | Append setup, read, encode, upscale and combined decode/postprocess/write measurements, plans, attempts, retries and completion events. |
 | `--oom_retries` | Maximum retries after the initial attempt, default 3. Set 0 to fail immediately. |
+| `--keep_on_vram` | Keep DiT and VAE resident on GPU across all generation phases (no CPU offload). Eliminates host-device PCIe weight transfer overhead (up to 2× speedup). Requires pre-flight capacity check; aborts with concrete recommendations if concurrent VRAM would cause OOM. |
 
 Budgets are **admission estimates and model-retention caps**, not allocator-enforced process limits. The planner reserves checkpoint/cache headroom and estimates pixel, latent, overlap and postprocess workspaces. Quantization, compiled graphs, CUDA kernels and codecs can use additional memory. Cache accounting measures parameter/buffer storage, not compiler caches. Cache caps are enforced between invocations; active inference can exceed them. CPU model offload trades VRAM for RAM. Explicit CUDA tensor offload can raise VRAM use beyond the default CPU-storage estimate.
 

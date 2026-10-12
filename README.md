@@ -87,44 +87,67 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 
 Use --help for the complete option list. Larger models, batches, and output resolutions require more VRAM. Start with a short sample at a modest resolution before processing a long video.
 
-### L4 GPU Benchmark (NVIDIA L4 · 22 GB VRAM · SM 8.9 Ada Lovelace)
+### L4 GPU 1080p Video Benchmark (NVIDIA L4 · 22 GB VRAM · SM 8.9 Ada Lovelace)
 
-Measured on Google Colab L4. Input: 320×478 px image. All runs use `--seed 42`, VAE tiling enabled, CPU offload. First-run download time excluded. SageAttention 2 is the default attention mode on L4 (SM ≥ 8.0).
+Measured on Google Colab L4 upscaling video from 640×360 to **1080p (1920×1080)**. SageAttention 2 is the default attention backend on L4 (SM 8.9).
 
-| Configuration | Attention | Output res | Total time | DiT phase |
-| :--- | :--- | :---: | :---: | :---: |
-| 3B Q4_K_M | SDPA | 360p (538px) | ~28 s | 3.3 s |
-| **3B Q4_K_M** | **SageAttn 2** | **360p** | **~16.5 s** ✅ | **6.8 s** |
-| **3B Q4_K_M** | **SageAttn 2** | **720p** | **~16.3 s** ✅ | **5.1 s** |
-| 3B Q8_0 | SageAttn 2 | 360p | ~17 s | 4.1 s |
-| 3B Q8_0 | SageAttn 2 | 720p | ~16.6 s | 5.4 s |
-| 7B Q4_K_M | SageAttn 2 | 360p | ~19 s | 6.8 s |
-| 7B Q4_K_M | SageAttn 2 | 720p | ~18.4 s | 7.1 s |
-| 7B FP8 mixed | SageAttn 2 | 360p | ~19 s | 5.6 s |
-| 7B FP8 mixed | SageAttn 2 | 720p | ~18.4 s | 6.9 s |
+| Configuration | Model | Batch Size | `--keep_on_vram` | Peak VRAM | DiT Time | Total Time |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **3B Q4 Baseline** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (Offload) | 5.01 GB | 7.95 s | 62.88 s |
+| **3B Q4 Fast** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ✅ | 6.94 GB | 6.59 s | **55.84 s** |
+| **3B Q4 Batch 9** | `seedvr2_ema_3b-Q4_K_M.gguf` | 9 | ✅ | 8.39 GB | 9.05 s (1.0s/f) | 89.20 s |
+| **3B Q4 Batch 13** | `seedvr2_ema_3b-Q4_K_M.gguf` | 13 | ✅ | 8.46 GB | 11.48 s (**0.88s/f**) | 122.86 s |
+| **7B Q4 Balance** | `seedvr2_ema_7b-Q4_K_M.gguf` | 5 | ✅ | 9.49 GB | 9.94 s | 72.66 s |
+| **7B Q4 Batch 9** | `seedvr2_ema_7b-Q4_K_M.gguf` | 9 | ✅ | 10.95 GB | 13.61 s (1.5s/f) | 95.80 s |
+| **7B Q8 High-Q** | `seedvr2_ema_7b-Q8_0.gguf` | 5 | ✅ | 13.29 GB | 9.60 s | 84.79 s |
+| **7B Q8 Batch 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | ✅ | 14.75 GB | 13.20 s (1.46s/f) | 96.11 s |
+| **7B FP16 Offload** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ❌ (Offload) | 13.42 GB | 29.37 s | 101.83 s |
+| **7B FP16 Resident** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ✅ | 20.41 GB | 8.90 s | **63.67 s** |
+| **3B Q4 Compiled** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (`--compile_dit`) | 5.01 GB | 113.44 s | 172.62 s (17× slower) |
 
-**Key findings:**
-- **SageAttention 2 is 1.7× faster than SDPA** on L4 (16.5 s vs 28 s for 3B Q4 360p).
-- **720p costs nearly the same as 360p** on L4's 22 GB VRAM — no tiling penalty.
-- **3B Q4_K_M + SageAttn 2 is the optimal balance**: fastest total time (≈16 s/frame), lowest VRAM, widest model compatibility.
-- **7B Q4_K_M adds only ~2 s per frame** vs 3B Q4 for significantly better quality at 720p.
-- **7B FP8** and **7B Q4** perform identically at 720p (~18.4 s); use Q4 for broader hardware support.
-- `torch.compile` on L4 with BF16 is **not recommended**: PyTorch Inductor emits bfloat16-on-SM89 warnings; eager mode is faster for single-frame jobs.
+#### Large Models Analysis (7B Q8_0 & 7B FP16 on L4 GPU)
+- **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**: Fully compatible with `--keep_on_vram` up to `--batch_size 9` (14.75 GB peak VRAM). Delivers visual fidelity virtually indistinguishable from FP16 while maintaining a comfortable 7 GB safety margin on L4's 22 GB.
+- **`seedvr2_ema_7b_fp16.safetensors` (~15.8 GB)**:
+  - **With `--keep_on_vram`**: Works smoothly at `--batch_size 5` and 1080p (20.41 GB peak VRAM). Do **not** use `--batch_size 9` with `--keep_on_vram`, as the pre-flight check will detect that ~22.6 GB is needed and safely abort to prevent OOM.
+  - **Without `--keep_on_vram`**: Runs with standard CPU offload across all batch sizes.
 
-**Optimal L4 command (single image, 720p):**
+#### 4 Optimal Parameter Configurations for L4 GPU
+
+##### 1. 最佳畫質 (Best Quality) — 7B Q8-0, Batch 9, 1080p
 ```bash
-python inference_cli.py input.png \
-  --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
-  --resolution 720 --attention_mode sageattn_2 \
-  --model_dir /content/models --output output.png
+python inference_cli.py input.mp4 \
+  --dit_model seedvr2_ema_7b-Q8_0.gguf \
+  --resolution 1080 --batch_size 9 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_best_quality.mp4
 ```
 
-**Best quality L4 command (7B, 720p):**
+##### 2. 最快時間 (Fastest Time / Max Throughput) — 3B Q4, Batch 13, 1080p
 ```bash
-python inference_cli.py input.png \
+python inference_cli.py input.mp4 \
+  --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
+  --resolution 1080 --batch_size 13 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_fastest.mp4
+```
+
+##### 3. 長影音 (Long Video / Movies / Multi-minute) — 7B Q4, Chunk 33, Overlap 3
+```bash
+python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
-  --resolution 720 --attention_mode sageattn_2 \
-  --model_dir /content/models --output output.png
+  --resolution 1080 --batch_size 9 \
+  --chunk_size 33 --temporal_overlap 3 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_long_video.mp4
+```
+
+##### 4. 短影音 (Short Video / High Precision Clips) — 7B FP16, Batch 5
+```bash
+python inference_cli.py input.mp4 \
+  --dit_model seedvr2_ema_7b_fp16.safetensors \
+  --resolution 1080 --batch_size 5 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_short_video.mp4
 ```
 
 CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels.

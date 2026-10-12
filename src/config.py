@@ -84,7 +84,7 @@ class InferenceConfig:
     cache: CacheConfig = field(default_factory=CacheConfig)
     swap: BlockSwapConfig = field(default_factory=BlockSwapConfig)
     attention_mode: str = "sageattn_2"
-
+    keep_on_vram: bool = False
 
 @dataclass(frozen=True, slots=True)
 class VideoConfig:

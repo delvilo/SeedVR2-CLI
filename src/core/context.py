@@ -31,6 +31,7 @@ class GenerationContext:
     actual_temporal_overlap: int | None = None
     postprocess_skip_head: int | None = None
     is_rgba: bool = False
+    keep_on_vram: bool = False
 
     def clear(self) -> None:
         """Drop this invocation's references, without mutating aliased tensor storage."""

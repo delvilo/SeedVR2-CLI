@@ -114,43 +114,71 @@ python inference_cli.py media_folder/ \
 | `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` | Mixed FP8/FP16 | ~7.5 GB | **11.5 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
 | `seedvr2_ema_7b_fp16.safetensors` | FP16 | ~14.8 GB | **18.0 GB** | ⚠️ 需 `--blocks_to_swap 32` | ✅ 原生直跑 |
 
-### L4 GPU 效能基準與實測結果（NVIDIA L4 · 22 GB VRAM · SM 8.9 Ada Lovelace）
+### L4 GPU 1080p 影片放大效能基準與實測（NVIDIA L4 · 22 GB VRAM · SM 8.9 Ada Lovelace）
 
-於 Google Colab L4 環境實測。輸入影像：320×478 px，固定 `--seed 42`，啟用 VAE 分塊與 CPU 卸載。扣除初次下載權重耗時。L4（SM 8.9）預設使用 SageAttention 2 注意力機制。
+於 Google Colab L4 環境實測，基準任務為將 640×360 視訊放大至 **1080p (1920×1080)**。L4 預設使用硬體原生的 SageAttention 2 注意力機制。
 
-| 模型與量化 | 注意力機制 | 輸出解析度 | 總流程耗時 | DiT 推理階段 |
-| :--- | :--- | :---: | :---: | :---: |
-| 3B Q4_K_M | SDPA | 360p (538px) | ~28 秒 | 3.3 秒 |
-| **3B Q4_K_M** | **SageAttn 2** | **360p** | **~16.5 秒** ✅ | **6.8 秒** |
-| **3B Q4_K_M** | **SageAttn 2** | **720p** | **~16.3 秒** ✅ | **5.1 秒** |
-| 3B Q8_0 | SageAttn 2 | 360p | ~17 秒 | 4.1 秒 |
-| 3B Q8_0 | SageAttn 2 | 720p | ~16.6 秒 | 5.4 秒 |
-| 7B Q4_K_M | SageAttn 2 | 360p | ~19 秒 | 6.8 秒 |
-| 7B Q4_K_M | SageAttn 2 | 720p | ~18.4 秒 | 7.1 秒 |
-| 7B FP8 mixed | SageAttn 2 | 360p | ~19 秒 | 5.6 秒 |
-| 7B FP8 mixed | SageAttn 2 | 720p | ~18.4 秒 | 6.9 秒 |
+| 測試配置 | 模型檔案 | 批次大小 (Batch) | `--keep_on_vram` | 顯存峰值 (Peak) | DiT 推理耗時 | 全流程總耗時 |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **3B Q4 卸載基準** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (CPU 卸載) | 5.01 GB | 7.95 秒 | 62.88 秒 |
+| **3B Q4 顯存常駐** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ✅ | 6.94 GB | 6.59 秒 | **55.84 秒** |
+| **3B Q4 批次 9** | `seedvr2_ema_3b-Q4_K_M.gguf` | 9 | ✅ | 8.39 GB | 9.05 秒 (1.0秒/幀) | 89.20 秒 |
+| **3B Q4 批次 13** | `seedvr2_ema_3b-Q4_K_M.gguf` | 13 | ✅ | 8.46 GB | 11.48 秒 (**0.88秒/幀**) | 122.86 秒 |
+| **7B Q4 平衡推薦** | `seedvr2_ema_7b-Q4_K_M.gguf` | 5 | ✅ | 9.49 GB | 9.94 秒 | 72.66 秒 |
+| **7B Q4 批次 9** | `seedvr2_ema_7b-Q4_K_M.gguf` | 9 | ✅ | 10.95 GB | 13.61 秒 (1.5秒/幀) | 95.80 秒 |
+| **7B Q8 高畫質** | `seedvr2_ema_7b-Q8_0.gguf` | 5 | ✅ | 13.29 GB | 9.60 秒 | 84.79 秒 |
+| **7B Q8 批次 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | ✅ | 14.75 GB | 13.20 秒 (1.46秒/幀) | 96.11 秒 |
+| **7B FP16 卸載模式** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ❌ (CPU 卸載) | 13.42 GB | 29.37 秒 | 101.83 秒 |
+| **7B FP16 顯存常駐** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ✅ | 20.41 GB | 8.90 秒 | **63.67 秒** |
+| **3B Q4 編譯模式** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (`--compile_dit`) | 5.01 GB | 113.44 秒 | 172.62 秒 (慢 17 倍) |
 
-**L4 實測核心結論：**
-1. **SageAttention 2 效能提升顯著**：相較於 SDPA，SageAttention 2 在 L4 上將完整單圖端到端時間由 28 秒降至 16.5 秒（加速 **1.7 倍**）。
-2. **720p 與 360p 耗時近乎無差**：因 L4 配備 22GB 顯存，720p 運算未觸發頻繁的分塊換頁，耗時維持在 ~16.3 秒。
-3. **3B Q4_K_M 為速度最優選**：端到端僅需約 16 秒，顯存佔用低，最適合批量處理與長影片放大。
-4. **7B 模型在 L4 表現優異**：7B Q4_K_M 與 7B FP8 放大 720p 僅需 18.4 秒，只比 3B 多約 2 秒，但畫面細節豐富度大幅提高。
-5. **7B FP8 vs 7B Q4**：兩者在 L4 上速度幾乎相同（~18.4 秒），建議優先採用 Q4_K_M。
+#### 大模型專題實測（7B Q8_0 與 7B FP16 在 L4 GPU）
+- **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**：
+  - **完全可行**！開啟 `--keep_on_vram` 且批次可開至 `--batch_size 9`，顯存峰值僅 14.75 GB，距離 22 GB 顯存上限有超過 7 GB 的安全餘量。畫質與 FP16 無肉眼差異，為大模型最高性價比首選。
+- **`seedvr2_ema_7b_fp16.safetensors` (~15.8 GB)**：
+  - **在 `--batch_size 5` 下可行**！常駐顯存峰值達 20.41 GB，全流程 63.67 秒。
+  - **在 `--batch_size 9` 下不可行**！預檢系統會精準偵測需 ~22.6 GB 顯存並主動安全中止（提供調整建議，不自動盲目 fallback）。
+  - **建議運作參數**：欲常駐運行 7B FP16 請務必保持 `--batch_size 5` 或更小；若需更大批次處理長影片，請關閉 `--keep_on_vram` 或改用 `7b-Q8_0`。
 
-**L4 推薦執行命令（極速平衡：3B Q4，720p）：**
+---
+
+#### L4 GPU 四大標準最佳參數推薦
+
+##### 1. 最佳畫質 (Best Quality) — 7B Q8-0, Batch 9, 1080p
 ```bash
-python inference_cli.py input.png \
-  --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
-  --resolution 720 --attention_mode sageattn_2 \
-  --model_dir /content/models --output output.png
+python inference_cli.py input.mp4 \
+  --dit_model seedvr2_ema_7b-Q8_0.gguf \
+  --resolution 1080 --batch_size 9 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_best_quality.mp4
 ```
 
-**L4 高畫質推薦命令（畫質優先：7B Q4，720p）：**
+##### 2. 最快時間 (Fastest Time / 最大吞吐量) — 3B Q4, Batch 13, 1080p
 ```bash
-python inference_cli.py input.png \
+python inference_cli.py input.mp4 \
+  --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
+  --resolution 1080 --batch_size 13 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_fastest.mp4
+```
+
+##### 3. 長影音 (Long Video / 多場景多分鐘長片) — 7B Q4, Chunk 33, Overlap 3
+```bash
+python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
-  --resolution 720 --attention_mode sageattn_2 \
-  --model_dir /content/models --output output.png
+  --resolution 1080 --batch_size 9 \
+  --chunk_size 33 --temporal_overlap 3 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_long_video.mp4
+```
+
+##### 4. 短影音 (Short Video / 數秒鏡頭極限修復) — 7B FP16, Batch 5
+```bash
+python inference_cli.py input.mp4 \
+  --dit_model seedvr2_ema_7b_fp16.safetensors \
+  --resolution 1080 --batch_size 5 \
+  --attention_mode sageattn_2 --keep_on_vram \
+  --video_backend ffmpeg --output output_short_video.mp4
 ```
 ---
 

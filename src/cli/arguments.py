@@ -138,6 +138,10 @@ def _add_device_group(parser: argparse.ArgumentParser) -> None:
                         help="VAE offload device when idle: 'none' or 'cpu'. Frees VRAM between phases. Default: cpu")
     device_group.add_argument("--tensor_offload_device", type=str, default="cpu",
                         help="Intermediate tensor storage: 'cpu' (recommended) or 'none' (keep on selected GPU). Default: cpu")
+    device_group.add_argument("--keep_on_vram", action="store_true",
+                        help="Keep both DiT and VAE resident on GPU VRAM across all phases (no CPU offloading). "
+                             "Delivers up to 2x speedup on GPUs with sufficient VRAM (e.g. L4/A100). "
+                             "Pre-flight check will abort with recommendations if VRAM is insufficient.")
 
 
 def _add_memory_group(parser: argparse.ArgumentParser) -> None:
@@ -277,9 +281,9 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
                 latent_noise_scale=a.latent_noise_scale,
             ),
             offload=OffloadConfig(
-                dit=a.dit_offload_device,
-                vae=a.vae_offload_device,
-                tensor=a.tensor_offload_device,
+                dit="none" if a.keep_on_vram else a.dit_offload_device,
+                vae="none" if a.keep_on_vram else a.vae_offload_device,
+                tensor="none" if a.keep_on_vram else a.tensor_offload_device,
             ),
             vae=VAEConfig(
                 encode=TileConfig(
@@ -305,16 +309,17 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
                 dynamo_recompile_limit=a.compile_dynamo_recompile_limit,
             ),
             cache=CacheConfig(
-                dit=a.cache_dit,
-                vae=a.cache_vae,
+                dit=True if a.keep_on_vram else a.cache_dit,
+                vae=True if a.keep_on_vram else a.cache_vae,
                 ram_gb=a.cache_ram_gb,
                 vram_gb=a.cache_vram_gb,
             ),
             swap=BlockSwapConfig(
-                blocks_to_swap=a.blocks_to_swap,
-                swap_io_components=a.swap_io_components,
+                blocks_to_swap=0 if a.keep_on_vram else a.blocks_to_swap,
+                swap_io_components=False if a.keep_on_vram else a.swap_io_components,
             ),
             attention_mode=a.attention_mode,
+            keep_on_vram=a.keep_on_vram,
         ),
         video=VideoConfig(
             chunk_size=a.chunk_size,

@@ -62,6 +62,42 @@ def get_min_vram(model_name: str) -> float:
         return 18.0 if "fp16" in model_name.lower() else (11.5 if "fp8" in model_name.lower() else 9.0)
     return 9.5 if "fp16" in model_name.lower() else (7.0 if "fp8" in model_name.lower() else 5.0)
 
+def estimate_keep_on_vram_gb(dit_model: str, resolution: int = 1080, batch_size: int = 5) -> float:
+    """
+    Estimate total concurrent VRAM (GiB) required when keeping both DiT and VAE
+    resident on GPU across all phases (--keep_on_vram).
+    """
+    model_lower = dit_model.lower()
+    dit_weights = {
+        "3b-q4": 1.9, "3b_q4": 1.9,
+        "3b-q8": 3.4, "3b_q8": 3.4,
+        "3b_fp8": 3.4, "3b-fp8": 3.4,
+        "3b_fp16": 6.8, "3b-fp16": 6.8,
+        "7b-q4": 4.3, "7b_q4": 4.3,
+        "7b-q8": 7.8, "7b_q8": 7.8,
+        "7b_fp8": 7.5, "7b-fp8": 7.5,
+        "7b_fp16": 14.8, "7b-fp16": 14.8,
+    }
+    dit_gb = 5.0
+    for k, v in dit_weights.items():
+        if k in model_lower:
+            dit_gb = v
+            break
+    else:
+        if "7b" in model_lower:
+            dit_gb = 14.8 if "fp16" in model_lower else (7.5 if "fp8" in model_lower else 4.5)
+        elif "3b" in model_lower:
+            dit_gb = 6.8 if "fp16" in model_lower else 2.0
+
+    vae_gb = 0.5
+    res_factor = (max(360, resolution) / 1080.0) ** 1.5
+    is_7b = "7b" in model_lower
+    base_act_gb = (3.5 if is_7b else 2.5) * res_factor
+    batch_act_gb = max(0, batch_size - 1) * (0.35 if is_7b else 0.2) * res_factor
+    overhead_gb = 1.0  # Context & allocator reserve
+
+    return dit_gb + vae_gb + base_act_gb + batch_act_gb + overhead_gb
+
 
 def get_available_dit_models() -> List[str]:
     """Get all available DiT models including those discovered on disk"""

@@ -321,7 +321,8 @@ def setup_generation_context(
     dit_offload_device: Optional[Union[str, torch.device]] = None,
     vae_offload_device: Optional[Union[str, torch.device]] = None,
     tensor_offload_device: Optional[Union[str, torch.device]] = None,
-    debug: Optional['Debug'] = None
+    debug: Optional['Debug'] = None,
+    keep_on_vram: bool = False
 ) -> GenerationContext:
     """
     Initialize generation context with device configuration.
@@ -364,6 +365,7 @@ def setup_generation_context(
         dit_device=dit_device, vae_device=vae_device,
         dit_offload_device=dit_offload_device, vae_offload_device=vae_offload_device,
         tensor_offload_device=tensor_offload_device, compute_dtype=COMPUTE_DTYPE,
+        keep_on_vram=keep_on_vram,
     )
 
     

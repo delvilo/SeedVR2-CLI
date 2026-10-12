@@ -28,17 +28,24 @@ def plan_file(config: AppConfig, width: int, height: int, device: str,
     reserve = int(sum(weights) * 1.25)
     blocks = 36 if '7b' in inference.model.dit_model else 32
     swap, offload = inference.swap, inference.offload
-    if vram and weights[0]:
-        needed = math.ceil(blocks * max(0, 1 - .45 * vram / weights[0]))
-        swap = replace(swap, blocks_to_swap=min(blocks, max(swap.blocks_to_swap, needed)))
-        if swap.blocks_to_swap:
-            offload = replace(offload, dit='cpu')
-    dit_resident = int(weights[0] * max(.1, 1 - swap.blocks_to_swap / blocks))
-    cache_ram = int(cache.ram_gb * GIB) if cache.ram_gb is not None else ram // 4
-    cache_vram = int(cache.vram_gb * GIB)
-    session.ram_cache_bytes = min(cache_ram, ram // 2) if cache.dit or cache.vae else 0
-    session.vram_cache_bytes = min(cache_vram, vram // 2) if cache.dit or cache.vae else 0
-    cache = replace(cache, ram_gb=session.ram_cache_bytes / GIB, vram_gb=session.vram_cache_bytes / GIB)
+    if inference.keep_on_vram:
+        swap = replace(swap, blocks_to_swap=0)
+        offload = replace(offload, dit='none', vae='none', tensor='none')
+        dit_resident = weights[0]
+        session.vram_cache_bytes = int(vram * 0.95)
+        cache = replace(cache, dit=True, vae=True, vram_gb=session.vram_cache_bytes / GIB)
+    else:
+        if vram and weights[0]:
+            needed = math.ceil(blocks * max(0, 1 - .45 * vram / weights[0]))
+            swap = replace(swap, blocks_to_swap=min(blocks, max(swap.blocks_to_swap, needed)))
+            if swap.blocks_to_swap:
+                offload = replace(offload, dit='cpu')
+        dit_resident = int(weights[0] * max(.1, 1 - swap.blocks_to_swap / blocks))
+        cache_ram = int(cache.ram_gb * GIB) if cache.ram_gb is not None else ram // 4
+        cache_vram = int(cache.vram_gb * GIB)
+        session.ram_cache_bytes = min(cache_ram, ram // 2) if cache.dit or cache.vae else 0
+        session.vram_cache_bytes = min(cache_vram, vram // 2) if cache.dit or cache.vae else 0
+        cache = replace(cache, ram_gb=session.ram_cache_bytes / GIB, vram_gb=session.vram_cache_bytes / GIB)
     session.finish(cache.dit, cache.vae)
     plan = plan_memory(width, height, sampling.resolution, sampling.max_resolution,
                        config.video.chunk_size, sampling.batch_size, sampling.temporal_overlap,

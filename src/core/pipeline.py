@@ -23,7 +23,9 @@ if TYPE_CHECKING:
     from .session import InferenceSession
 
 
-def parse_offload_device(value: str | None, cache_enabled: bool = False) -> str | None:
+def parse_offload_device(value: str | None, cache_enabled: bool = False, keep_on_vram: bool = False) -> str | None:
+    if keep_on_vram:
+        return None
     if value is None or value == "none":
         return "cpu" if cache_enabled else None
     if value in ("cpu", "cuda") or ":" in value:
@@ -38,13 +40,15 @@ def iter_processed_batches(
     debug: Debug, session: InferenceSession, memory_report: str | None = None,
 ) -> Generator[torch.Tensor, None, None]:
     inference_device = device
-    cache_dit, cache_vae = config.cache.dit, config.cache.vae
-    dit_offload = parse_offload_device(config.offload.dit, cache_dit)
-    vae_offload = parse_offload_device(config.offload.vae, cache_vae)
-    tensor_offload = parse_offload_device(config.offload.tensor)
+    keep_on_vram = config.keep_on_vram
+    cache_dit = config.cache.dit or keep_on_vram
+    cache_vae = config.cache.vae or keep_on_vram
+    dit_offload = parse_offload_device(config.offload.dit, cache_dit, keep_on_vram)
+    vae_offload = parse_offload_device(config.offload.vae, cache_vae, keep_on_vram)
+    tensor_offload = parse_offload_device(config.offload.tensor, False, keep_on_vram)
     ctx = setup_generation_context(dit_device=inference_device, vae_device=inference_device,
         dit_offload_device=dit_offload, vae_offload_device=vae_offload,
-        tensor_offload_device=tensor_offload, debug=debug)
+        tensor_offload_device=tensor_offload, debug=debug, keep_on_vram=keep_on_vram)
     recorder = MemoryRecorder(memory_report, inference_device)
     # Prepare runner with caching support
     model_dir = config.model.model_dir if config.model.model_dir is not None else get_base_cache_dir()
@@ -75,6 +79,7 @@ def iter_processed_batches(
                 torch_compile_args_dit=config.compile if config.compile.dit else None,
                 torch_compile_args_vae=config.compile if config.compile.vae else None
             )
+            runner._keep_on_vram = keep_on_vram
 
             # Preload text embeddings before Phase 1 to avoid sync stall in Phase 2
             ctx.text_embeds = load_text_embeddings(script_directory, ctx.dit_device, ctx.compute_dtype, debug)

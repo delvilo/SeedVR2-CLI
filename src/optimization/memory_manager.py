@@ -893,7 +893,10 @@ def cleanup_dit(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         param_device = next(runner.dit.parameters()).device
         
         # Move model off GPU if needed
-        if cache_model and param_device.type not in ['meta', 'cpu']:
+        if getattr(runner, '_keep_on_vram', False) and cache_model and param_device.type == 'cuda':
+            if debug:
+                debug.log("DiT kept resident on GPU VRAM (--keep_on_vram)", category="cleanup")
+        elif cache_model and param_device.type not in ['meta', 'cpu']:
             offload_target = getattr(runner, '_dit_offload_device', None)
             if offload_target is None or offload_target == 'none':
                 offload_target = torch.device('cpu')
@@ -966,7 +969,10 @@ def cleanup_vae(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
         param_device = next(runner.vae.parameters()).device
         
         # Move model off GPU if needed
-        if cache_model and param_device.type not in ['meta', 'cpu']:
+        if getattr(runner, '_keep_on_vram', False) and cache_model and param_device.type == 'cuda':
+            if debug:
+                debug.log("VAE kept resident on GPU VRAM (--keep_on_vram)", category="cleanup")
+        elif cache_model and param_device.type not in ['meta', 'cpu']:
             offload_target = getattr(runner, '_vae_offload_device', None)
             if offload_target is None or offload_target == 'none':
                 offload_target = torch.device('cpu')

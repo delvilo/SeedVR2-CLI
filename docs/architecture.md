@@ -18,8 +18,8 @@ when imported.
 | `src/core/planning.py` | Derive a per-file execution configuration from available memory and session cache budgets. |
 | `src/core/session.py` | Own one runner and bounded model caches; expose `iter_batches` independently of the CLI. |
 | `src/core/pipeline.py` | Run encode, upscale and streamed decode/postprocess for one input window. |
-| `src/core/context.py` | Explicit mutable `GenerationContext` fields for one invocation's tensors and metadata. |
 | `src/core/streaming.py` | Finalize decoded overlap and yield bounded output batches. |
+| `src/core/context.py` | Explicit mutable `GenerationContext` fields for one invocation's tensors and metadata. Supports `keep_on_vram` flag for GPU resident pipelines. |
 
 Dependencies flow from the CLI to scheduling, media and sessions. Core inference
 never imports the CLI or reads `sys.argv`. Model class imports are deferred until

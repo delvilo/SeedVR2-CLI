@@ -127,3 +127,27 @@ def test_blockswap_buffer_only_and_dtype_to():
     k = torch.randn(1, 2, 8, 24, dtype=torch.float16)
     out_q, out_k = model.rope(q, k, size=(1, 4, 2))
     assert out_q.shape == q.shape
+
+def test_estimate_keep_on_vram_gb():
+    from src.utils.model_registry import estimate_keep_on_vram_gb
+    # 3B Q4 at 1080p, batch 5
+    vram_3b = estimate_keep_on_vram_gb("seedvr2_ema_3b-Q4_K_M.gguf", 1080, 5)
+    assert 6.0 <= vram_3b <= 8.5
+    # 7B Q8 at 1080p, batch 5
+    vram_7b_q8 = estimate_keep_on_vram_gb("seedvr2_ema_7b-Q8_0.gguf", 1080, 5)
+    assert 13.0 <= vram_7b_q8 <= 17.0
+    # 7B fp16 at 1080p, batch 5
+    vram_7b_fp16 = estimate_keep_on_vram_gb("seedvr2_ema_7b_fp16.safetensors", 1080, 5)
+    assert vram_7b_fp16 >= 20.0
+
+
+def test_cli_keep_on_vram_flags():
+    from src.cli.arguments import parse_arguments
+    cfg = parse_arguments(["dummy.mp4", "--keep_on_vram"])
+    assert cfg.inference.keep_on_vram is True
+    assert cfg.inference.offload.dit == "none"
+    assert cfg.inference.offload.vae == "none"
+    assert cfg.inference.offload.tensor == "none"
+    assert cfg.inference.cache.dit is True
+    assert cfg.inference.cache.vae is True
+    assert cfg.inference.swap.blocks_to_swap == 0
