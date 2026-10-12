@@ -142,10 +142,9 @@ class Debug:
         # Version and credits - left/right aligned to logo width
         version_text = f"v{__version__}"
         left_part = f"💻 SeedVR2-cli · {version_text}"
-        right_part = "© NumZ · AInVFX"
         logo_width = 75
-        padding = logo_width - len(left_part) - len(right_part) - 1
-        self.log(f"{left_part}{' ' * max(1, padding)}{right_part}", category="none", force=True, indent_level=1)
+        padding = logo_width - len(left_part) - 1
+        self.log(f"{left_part}", category="none", force=True, indent_level=1)
         self.log("━" * logo_width, category="none", force=True, indent_level=1)
         self.log("", category="none", force=True)
         
@@ -221,8 +220,6 @@ class Debug:
         """Print the footer with links - always displayed"""
         self.log("", category="none", force=True)
         self.log("────────────────────────", category="none", force=True)
-        self.log("Questions? Updates? Watch, star & sponsor if you can!", category="dialogue", force=True)
-        self.log("https://www.youtube.com/@AInVFX", category="generation", force=True)
         self.log("https://github.com/delvilo/SeedVR2Lite_VideoUpscaler", category="starlove", force=True)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings

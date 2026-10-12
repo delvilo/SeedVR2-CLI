@@ -100,6 +100,58 @@ python inference_cli.py media_folder/ \
 | `--video_backend` | 視訊編碼器後端：`opencv` 或 `ffmpeg`（支援 `--10bit` 高動態範圍）。 |
 | `--debug` | 輸出詳細除錯訊息、時延分析與顯存即時監控數據。 |
 
+
+### 模型顯存需求（啟動前檢查）
+
+| 模型名稱 | 精度格式 | 權重體積 | 最低顯存（不開 BlockSwap） | Colab T4 (15 GB) | Colab L4 (22 GB) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `seedvr2_ema_3b-Q4_K_M.gguf` | Q4_K_M | ~1.86 GB | **5.0 GB** | ✅ 原生直跑 | ✅ 原生直跑（**最推薦**） |
+| `seedvr2_ema_3b-Q8_0.gguf` | Q8_0 | ~3.4 GB | **7.0 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
+| `seedvr2_ema_3b_fp8_e4m3fn.safetensors` | FP8 | ~3.4 GB | **7.0 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
+| `seedvr2_ema_3b_fp16.safetensors` | FP16 | ~6.8 GB | **9.5 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
+| `seedvr2_ema_7b-Q4_K_M.gguf` | Q4_K_M | ~4.3 GB | **8.5 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
+| `seedvr2_ema_7b-Q8_0.gguf` | Q8_0 | ~7.8 GB | **12.0 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
+| `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` | Mixed FP8/FP16 | ~7.5 GB | **11.5 GB** | ✅ 原生直跑 | ✅ 原生直跑 |
+| `seedvr2_ema_7b_fp16.safetensors` | FP16 | ~14.8 GB | **18.0 GB** | ⚠️ 需 `--blocks_to_swap 32` | ✅ 原生直跑 |
+
+### L4 GPU 效能基準與實測結果（NVIDIA L4 · 22 GB VRAM · SM 8.9 Ada Lovelace）
+
+於 Google Colab L4 環境實測。輸入影像：320×478 px，固定 `--seed 42`，啟用 VAE 分塊與 CPU 卸載。扣除初次下載權重耗時。L4（SM 8.9）預設使用 SageAttention 2 注意力機制。
+
+| 模型與量化 | 注意力機制 | 輸出解析度 | 總流程耗時 | DiT 推理階段 |
+| :--- | :--- | :---: | :---: | :---: |
+| 3B Q4_K_M | SDPA | 360p (538px) | ~28 秒 | 3.3 秒 |
+| **3B Q4_K_M** | **SageAttn 2** | **360p** | **~16.5 秒** ✅ | **6.8 秒** |
+| **3B Q4_K_M** | **SageAttn 2** | **720p** | **~16.3 秒** ✅ | **5.1 秒** |
+| 3B Q8_0 | SageAttn 2 | 360p | ~17 秒 | 4.1 秒 |
+| 3B Q8_0 | SageAttn 2 | 720p | ~16.6 秒 | 5.4 秒 |
+| 7B Q4_K_M | SageAttn 2 | 360p | ~19 秒 | 6.8 秒 |
+| 7B Q4_K_M | SageAttn 2 | 720p | ~18.4 秒 | 7.1 秒 |
+| 7B FP8 mixed | SageAttn 2 | 360p | ~19 秒 | 5.6 秒 |
+| 7B FP8 mixed | SageAttn 2 | 720p | ~18.4 秒 | 6.9 秒 |
+
+**L4 實測核心結論：**
+1. **SageAttention 2 效能提升顯著**：相較於 SDPA，SageAttention 2 在 L4 上將完整單圖端到端時間由 28 秒降至 16.5 秒（加速 **1.7 倍**）。
+2. **720p 與 360p 耗時近乎無差**：因 L4 配備 22GB 顯存，720p 運算未觸發頻繁的分塊換頁，耗時維持在 ~16.3 秒。
+3. **3B Q4_K_M 為速度最優選**：端到端僅需約 16 秒，顯存佔用低，最適合批量處理與長影片放大。
+4. **7B 模型在 L4 表現優異**：7B Q4_K_M 與 7B FP8 放大 720p 僅需 18.4 秒，只比 3B 多約 2 秒，但畫面細節豐富度大幅提高。
+5. **7B FP8 vs 7B Q4**：兩者在 L4 上速度幾乎相同（~18.4 秒），建議優先採用 Q4_K_M。
+
+**L4 推薦執行命令（極速平衡：3B Q4，720p）：**
+```bash
+python inference_cli.py input.png \
+  --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
+  --resolution 720 --attention_mode sageattn_2 \
+  --model_dir /content/models --output output.png
+```
+
+**L4 高畫質推薦命令（畫質優先：7B Q4，720p）：**
+```bash
+python inference_cli.py input.png \
+  --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
+  --resolution 720 --attention_mode sageattn_2 \
+  --model_dir /content/models --output output.png
+```
 ---
 
 ## 專案歷史與致謝

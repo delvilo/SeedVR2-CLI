@@ -1,12 +1,12 @@
 # SeedVR2-cli — standalone CLI
 
 SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
-
 **Key Improvements & Fixes**:
 - **Zero OOM on Colab Free T4 GPU / CPU**: Resolves upstream OOM crashes through automatic multi-level VAE tiling (down to 128px), causal 3D convolution slicing, and transactional OOM recovery with dynamic BlockSwap.
 - **Pre-flight VRAM Capacity Check**: Validates available GPU memory before downloading weights or allocating buffers; terminates early with helpful recommendations instead of crashing mid-run.
 - **TorchCodec Native Video Decoding**: Completely removes `torchvision` and `torchaudio` dependencies; adopts high-throughput PyTorch `TorchCodec` for direct tensor decoding and pure PyTorch functional image transforms.
-- **Full Colab Compatibility**: Tested and verified on Google Colab free Tesla T4 (15GB VRAM) and CPU runtimes.
+- **GPU-Adaptive Attention**: Automatically selects SageAttention 2 on SM ≥ 8.0 (Ampere/Ada/Hopper/L4) and falls back to PyTorch SDPA on SM 7.5 (T4) where the SageAttention Triton kernel is unsupported.
+- **Tested on Colab T4 (15 GB) and L4 (22 GB)**: See benchmark results below.
 
 [English](README.md) | [中文說明檔](README_zh.md)
 
@@ -74,17 +74,58 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 
 ### Model VRAM Requirements (Pre-flight Check)
 
-| Model Name | Precision | Weight Size | Min VRAM (No BlockSwap) | Colab T4 (15GB) Compatibility |
-| :--- | :--- | :--- | :--- | :--- |
-| `seedvr2_ema_3b-Q4_K_M.gguf` | Q4_K_M | ~1.86 GB | **5.0 GB** | ✅ Native (Fastest) |
-| `seedvr2_ema_3b-Q8_0.gguf` | Q8_0 | ~3.4 GB | **7.0 GB** | ✅ Native |
-| `seedvr2_ema_3b_fp8_e4m3fn.safetensors` | FP8 | ~3.4 GB | **7.0 GB** | ✅ Native |
-| `seedvr2_ema_3b_fp16.safetensors` | FP16 | ~6.8 GB | **9.5 GB** | ✅ Native |
-| `seedvr2_ema_7b-Q4_K_M.gguf` | Q4_K_M | ~4.3 GB | **8.5 GB** | ✅ Native |
-| `seedvr2_ema_7b-Q8_0.gguf` | Q8_0 | ~7.8 GB | **12.0 GB** | ✅ Native |
-| `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` | Mixed FP8/FP16 | ~7.5 GB | **11.5 GB** | ✅ Native |
-| `seedvr2_ema_7b_fp16.safetensors` | FP16 | ~14.8 GB | **18.0 GB** | ⚠️ Requires `--blocks_to_swap 32` (OOM without swap) |
+| Model Name | Precision | Weight Size | Min VRAM (No BlockSwap) | Colab T4 (15 GB) | Colab L4 (22 GB) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `seedvr2_ema_3b-Q4_K_M.gguf` | Q4_K_M | ~1.86 GB | **5.0 GB** | ✅ Native | ✅ Native (**Recommended**) |
+| `seedvr2_ema_3b-Q8_0.gguf` | Q8_0 | ~3.4 GB | **7.0 GB** | ✅ Native | ✅ Native |
+| `seedvr2_ema_3b_fp8_e4m3fn.safetensors` | FP8 | ~3.4 GB | **7.0 GB** | ✅ Native | ✅ Native |
+| `seedvr2_ema_3b_fp16.safetensors` | FP16 | ~6.8 GB | **9.5 GB** | ✅ Native | ✅ Native |
+| `seedvr2_ema_7b-Q4_K_M.gguf` | Q4_K_M | ~4.3 GB | **8.5 GB** | ✅ Native | ✅ Native |
+| `seedvr2_ema_7b-Q8_0.gguf` | Q8_0 | ~7.8 GB | **12.0 GB** | ✅ Native | ✅ Native |
+| `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` | Mixed FP8/FP16 | ~7.5 GB | **11.5 GB** | ✅ Native | ✅ Native |
+| `seedvr2_ema_7b_fp16.safetensors` | FP16 | ~14.8 GB | **18.0 GB** | ⚠️ `--blocks_to_swap 32` | ✅ Native |
+
 Use --help for the complete option list. Larger models, batches, and output resolutions require more VRAM. Start with a short sample at a modest resolution before processing a long video.
+
+### L4 GPU Benchmark (NVIDIA L4 · 22 GB VRAM · SM 8.9 Ada Lovelace)
+
+Measured on Google Colab L4. Input: 320×478 px image. All runs use `--seed 42`, VAE tiling enabled, CPU offload. First-run download time excluded. SageAttention 2 is the default attention mode on L4 (SM ≥ 8.0).
+
+| Configuration | Attention | Output res | Total time | DiT phase |
+| :--- | :--- | :---: | :---: | :---: |
+| 3B Q4_K_M | SDPA | 360p (538px) | ~28 s | 3.3 s |
+| **3B Q4_K_M** | **SageAttn 2** | **360p** | **~16.5 s** ✅ | **6.8 s** |
+| **3B Q4_K_M** | **SageAttn 2** | **720p** | **~16.3 s** ✅ | **5.1 s** |
+| 3B Q8_0 | SageAttn 2 | 360p | ~17 s | 4.1 s |
+| 3B Q8_0 | SageAttn 2 | 720p | ~16.6 s | 5.4 s |
+| 7B Q4_K_M | SageAttn 2 | 360p | ~19 s | 6.8 s |
+| 7B Q4_K_M | SageAttn 2 | 720p | ~18.4 s | 7.1 s |
+| 7B FP8 mixed | SageAttn 2 | 360p | ~19 s | 5.6 s |
+| 7B FP8 mixed | SageAttn 2 | 720p | ~18.4 s | 6.9 s |
+
+**Key findings:**
+- **SageAttention 2 is 1.7× faster than SDPA** on L4 (16.5 s vs 28 s for 3B Q4 360p).
+- **720p costs nearly the same as 360p** on L4's 22 GB VRAM — no tiling penalty.
+- **3B Q4_K_M + SageAttn 2 is the optimal balance**: fastest total time (≈16 s/frame), lowest VRAM, widest model compatibility.
+- **7B Q4_K_M adds only ~2 s per frame** vs 3B Q4 for significantly better quality at 720p.
+- **7B FP8** and **7B Q4** perform identically at 720p (~18.4 s); use Q4 for broader hardware support.
+- `torch.compile` on L4 with BF16 is **not recommended**: PyTorch Inductor emits bfloat16-on-SM89 warnings; eager mode is faster for single-frame jobs.
+
+**Optimal L4 command (single image, 720p):**
+```bash
+python inference_cli.py input.png \
+  --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
+  --resolution 720 --attention_mode sageattn_2 \
+  --model_dir /content/models --output output.png
+```
+
+**Best quality L4 command (7B, 720p):**
+```bash
+python inference_cli.py input.png \
+  --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
+  --resolution 720 --attention_mode sageattn_2 \
+  --model_dir /content/models --output output.png
+```
 
 CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels.
 
