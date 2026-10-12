@@ -73,6 +73,24 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --debug | Show environment, timing, VRAM, and processing details. |
 | --cuda_device | Select one visible CUDA device index; defaults to device 0. |
 
+### Attention Backends & Pre-built FlashAttention-2 Installation
+
+SeedVR2-cli supports multiple attention backends (`--attention_mode`):
+- **`sageattn_2`** (Default): Fast INT8/FP16 kernels. Installs instantly via `pip install sageattention`. Recommended on SM 8.0+ (L4/A100) and automatically falls back to SDPA on SM 7.5 (T4).
+- **`sdpa`**: PyTorch Native Scaled Dot-Product Attention (built-in, zero installation required).
+- **`flash_attn_2`**: Optimized CUDA attention for Ampere, Ada and Hopper GPUs (SM 8.0+). **Do not build from source** (compilation takes ~25 minutes). Install pre-built binary wheels directly:
+
+**Google Colab (Ubuntu 24.04 / Python 3.13 / PyTorch 2.11 / L4 or A100 GPU):**
+```bash
+pip install --no-deps https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3+cu128torch2.11-cp313-cp313-linux_x86_64.whl
+```
+
+**Standard Linux / CUDA 12.x / PyTorch 2.4+ Environments:**
+```bash
+pip install flash-attn --no-build-isolation
+# Or browse prebuilt wheels from: https://github.com/Dao-AILab/flash-attention/releases
+```
+
 ### Model VRAM Requirements (Pre-flight Check)
 
 | Model Name | Precision | Weight Size | Min VRAM (No BlockSwap) | Colab T4 (15 GB) | Colab L4 (22 GB) |

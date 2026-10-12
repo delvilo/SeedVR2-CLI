@@ -105,6 +105,24 @@ python inference_cli.py media_folder/ \
 | `--debug` | 輸出詳細除錯訊息、時延分析與顯存即時監控數據。 |
 | `--resume` | 開啟長影片中斷續傳功能。自動掃描並接續已完成的分段檢查點，全片完成後 1 秒無損合併。 |
 
+### 注意力機制與預編譯 FlashAttention-2 安裝指令
+
+SeedVR2-cli 支援多種注意力後端（`--attention_mode`）：
+- **`sageattn_2`**（預設）：速度極快，透過 `pip install sageattention` 即可秒裝。SM 8.0+（L4 / A100）原生全速支援，T4 (SM 7.5) 會自動平滑回退至 SDPA。
+- **`sdpa`**：PyTorch 原生縮放點積注意力（內建，免安裝任何外部套件）。
+- **`flash_attn_2`**：針對 Ampere、Ada、Hopper 架構（SM 8.0+）的高效 CUDA 注意力。**切勿從源碼編譯**（編譯需 25 分鐘以上）。請直接安裝對應環境的官方或社群預編譯 Wheel 輪子：
+
+**Google Colab 環境（Ubuntu 24.04 / Python 3.13 / PyTorch 2.11 / L4 或 A100 GPU）：**
+```bash
+pip install --no-deps https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.4/flash_attn-2.8.3+cu128torch2.11-cp313-cp313-linux_x86_64.whl
+```
+
+**標準 Linux / CUDA 12.x / PyTorch 2.4+ 本地環境：**
+```bash
+pip install flash-attn --no-build-isolation
+# 或至官方倉庫下載對應版本輪子：https://github.com/Dao-AILab/flash-attention/releases
+```
+
 
 ### 模型顯存需求（啟動前檢查）
 
