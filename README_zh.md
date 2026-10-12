@@ -1,6 +1,6 @@
 # SeedVR2-cli — 獨立 CLI 影像與影片超解析度放大工具
 
-SeedVR2 是基於 Linux 命令列的影像與影片超解析度放大工具。推理管線採用單張 NVIDIA GPU 運行，並支援 CPU 平行計算進行卸載（Offload）與前處理，具備目錄批次處理、有限視訊流式傳輸、模型記憶體復用、VAE Tiling 分塊編解碼、DiT BlockSwap 區塊交換，以及可選的 torch.compile 加速。
+SeedVR2 是基於 Linux 命令列的影像與影片超解析度放大工具。推理管線採用單張 NVIDIA GPU 運行，並支援 CPU 平行計算進行卸載（Offload）與前處理，具備目錄批次處理、有限視訊流式傳輸、模型記憶體復用、VAE Tiling 分塊編解碼、DiT BlockSwap 區塊交換，以及長影片中斷續傳（--resume）。
 
 [English](README.md) | [中文說明檔](README_zh.md)
 
@@ -17,9 +17,13 @@ SeedVR2 是基於 Linux 命令列的影像與影片超解析度放大工具。�
    - 若 VRAM 容量不足以原生載入該模型且未配置 BlockSwap，會提前終止並提供具體改善建議（例如建議改用 Q4_K_M GGUF 或加上 `--blocks_to_swap` 參數），避免耗費時間下載數十 GB 權重後直接 OOM 報錯。
 3. **全面移除 `torchvision` 與 `torchaudio` 依賴**：
    - `torchaudio` 全面自需求清單中清除（無任何引用）。
-   - `torchvision` 影像變換改用 **原生純 PyTorch Tensor 運算**（`torch.nn.functional.interpolate` 與張量切片），具備最佳效能且高度相容於 `torch.compile`。
+   - `torchvision` 影像變換改用 **原生純 PyTorch Tensor 運算**（`torch.nn.functional.interpolate` 與張量切片），具備最佳效能。
    - 視訊解碼升級為 Meta 官方 **`TorchCodec` (VideoDecoder)**，直接解碼為 PyTorch 張量，消除 OpenCV 逐幀讀取的 Python GIL 瓶頸與記憶體搬移開銷。
 
+4. **長影片斷點續傳支援（`--resume`）**：
+   - 專為 Google Colab 免費 T4 執行階段設計。每 33 幀自動保存獨立視訊分段檢查點與進度清冊。
+   - 若 Colab 閒置斷線或遭時長限制中斷，下次執行相同指令加上 `--resume` 即可自動跳過已完成的 Chunk，並自動由原片預讀時序尾巴無縫平滑接續。
+   - 全部 Chunk 完成後，透過 FFmpeg Concat Demuxer 在不到 1 秒內無損拼接為最終輸出，並完整保留原始音訊。
 ---
 
 ## 模型最低 VRAM 需求表
@@ -99,6 +103,7 @@ python inference_cli.py media_folder/ \
 | `--color_correction` | 色彩校正演算法：`lab`（預設，色彩逼真度最高）、`wavelet`、`wavelet_adaptive`、`none`。 |
 | `--video_backend` | 視訊編碼器後端：`opencv` 或 `ffmpeg`（支援 `--10bit` 高動態範圍）。 |
 | `--debug` | 輸出詳細除錯訊息、時延分析與顯存即時監控數據。 |
+| `--resume` | 開啟長影片中斷續傳功能。自動掃描並接續已完成的分段檢查點，全片完成後 1 秒無損合併。 |
 
 
 ### 模型顯存需求（啟動前檢查）
@@ -130,7 +135,6 @@ python inference_cli.py media_folder/ \
 | **7B Q8 批次 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | ✅ | 14.75 GB | 13.20 秒 (1.46秒/幀) | 96.11 秒 |
 | **7B FP16 卸載模式** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ❌ (CPU 卸載) | 13.42 GB | 29.37 秒 | 101.83 秒 |
 | **7B FP16 顯存常駐** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ✅ | 20.41 GB | 8.90 秒 | **63.67 秒** |
-| **3B Q4 編譯模式** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (`--compile_dit`) | 5.01 GB | 113.44 秒 | 172.62 秒 (慢 17 倍) |
 
 #### 大模型專題實測（7B Q8_0 與 7B FP16 在 L4 GPU）
 - **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**：

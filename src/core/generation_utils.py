@@ -28,7 +28,7 @@ These utilities support the 4-phase pipeline implemented in generation_phases.py
 
 from .context import GenerationContext
 
-from ..config import BlockSwapConfig, CompileConfig
+from ..config import BlockSwapConfig
 
 import os
 import torch
@@ -417,8 +417,7 @@ def prepare_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
-    torch_compile_args_dit: Optional[CompileConfig] = None,
-    torch_compile_args_vae: Optional[CompileConfig] = None
+
 ) -> 'VideoDiffusionInfer':
     """
     Prepare runner with model state management and session cache integration.
@@ -476,8 +475,7 @@ def prepare_runner(
         decode_tile_overlap=decode_tile_overlap,
         tile_debug=tile_debug,
         attention_mode=attention_mode,
-        torch_compile_args_dit=torch_compile_args_dit,
-        torch_compile_args_vae=torch_compile_args_vae
+
     )
 
     return runner

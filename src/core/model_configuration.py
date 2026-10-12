@@ -56,7 +56,7 @@ This module uses model_loader for actual weight loading operations.
 
 from .context import GenerationContext
 
-from ..config import BlockSwapConfig, CompileConfig
+from ..config import BlockSwapConfig
 
 import os
 import torch
@@ -128,44 +128,6 @@ def _describe_blockswap_config(config: Optional[BlockSwapConfig]) -> str:
     
     return f"enabled ({', '.join(parts)})"
 
-
-def _describe_compile_config(config: Optional[CompileConfig]) -> str:
-    """
-    Generate human-readable description of torch.compile configuration.
-    
-    Args:
-        config: torch.compile configuration object
-        
-    Returns:
-        Human-readable description string
-    """
-    if config is None or not config:
-        return "disabled"
-    
-    # Core parameters
-    mode = config.mode
-    backend = config.backend
-    
-    parts = [f"{mode} mode"]
-    
-    # Optional flags
-    if backend != "inductor":
-        parts.append(f"{backend} backend")
-    if config.fullgraph:
-        parts.append("fullgraph")
-    if config.dynamic:
-        parts.append("dynamic")
-    
-    # Dynamo tuning parameters (show if non-default)
-    cache_limit = config.dynamo_cache_size_limit
-    recompile_limit = config.dynamo_recompile_limit
-    
-    if cache_limit != 64:
-        parts.append(f"cache_limit={cache_limit}")
-    if recompile_limit != 128:
-        parts.append(f"recompile_limit={recompile_limit}")
-    
-    return f"enabled ({', '.join(parts)})"
 
 
 def _describe_attention_mode(attention_mode: Optional[str]) -> str:
@@ -324,30 +286,6 @@ def _detect_config_changes(
     return changes_detected, config_changes
 
 
-def _unwrap_compiled_model(
-    model: torch.nn.Module,
-    model_attr: str,
-    model_type: str,
-    runner: 'VideoDiffusionInfer',
-    debug: Optional['Debug'] = None
-) -> torch.nn.Module:
-    """Unwrap torch.compile wrappers from DiT model or VAE encoder/decoder submodules if present."""
-    if model_attr == 'dit' and hasattr(model, '_orig_mod'):
-        if debug:
-            debug.log(f"Removing torch.compile from {model_type}", category="setup")
-        model = model._orig_mod
-        setattr(runner, model_attr, model)
-    elif model_attr == 'vae':
-        if hasattr(model, 'encoder') and hasattr(model.encoder, '_orig_mod'):
-            if debug:
-                debug.log(f"Removing torch.compile from {model_type} encoder", category="setup")
-            model.encoder = model.encoder._orig_mod
-        if hasattr(model, 'decoder') and hasattr(model.decoder, '_orig_mod'):
-            if debug:
-                debug.log(f"Removing torch.compile from {model_type} decoder", category="setup")
-            model.decoder = model.decoder._orig_mod
-    return model
-
 
 def _update_model_config(
     runner: 'VideoDiffusionInfer',
@@ -410,10 +348,7 @@ def _update_model_config(
         for change in config_changes:
             debug.log(f"{change}", category=model_type.lower(), force=True, indent_level=1)
     
-    # Handle torch.compile unwrapping if needed
-    if changes_detected.get('torch_compile', False):
-        model = _unwrap_compiled_model(model, model_attr, model_type, runner, debug)
-    
+
     # Execute special handlers for config-specific logic
     if special_handlers:
         for config_name, handler in special_handlers.items():
@@ -471,56 +406,27 @@ def _handle_blockswap_change(
 def _update_dit_config(
     runner: 'VideoDiffusionInfer',
     block_swap_config: Optional[BlockSwapConfig],
-    torch_compile_args: Optional[CompileConfig],
     attention_mode: Optional[str],
     debug: Optional['Debug'] = None
 ) -> bool:
-    """
-    Update DiT model configuration when reusing cached model.
-    
-    Compares new configuration settings against cached config to detect changes.
-    Handles BlockSwap, torch.compile, and attention_mode configuration updates with 
-    proper cleanup and reapplication when settings change.
-    
-    Args:
-        runner: VideoDiffusionInfer instance with cached DiT model
-        block_swap_config: New BlockSwap configuration object with fields:
-            - blocks_to_swap: int - Number of transformer blocks to offload
-            - swap_io_components: bool - Whether to offload I/O components
-        torch_compile_args: New torch.compile configuration object with fields:
-            - backend: str - Compiler backend (default: "inductor")
-            - mode: str - Compilation mode (default: "default")
-            - fullgraph: bool - Require single graph compilation
-            - dynamic: bool - Enable dynamic shapes
-            - dynamo_cache_size_limit: int - Cache size limit
-            - dynamo_recompile_limit: int - Recompilation limit
-        attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
-        debug: Debug instance for logging
-        
-    Returns:
-        bool: True if configuration was successfully updated
-    """
+    """Update DiT model configuration when reusing cached model."""
     return _update_model_config(
         runner=runner,
         model_attr='dit',
         model_type='DiT',
         new_configs={
-            'torch_compile': torch_compile_args,
             'block_swap': block_swap_config,
             'attention_mode': attention_mode
         },
         cached_config_attrs={
-            'torch_compile': '_dit_compile_args',
             'block_swap': '_dit_block_swap_config',
             'attention_mode': '_dit_attention_mode'
         },
         model_config_attrs={
-            'torch_compile': '_config_compile',
             'block_swap': '_config_swap',
             'attention_mode': '_config_attn'
         },
         config_describers={
-            'torch_compile': _describe_compile_config,
             'block_swap': _describe_blockswap_config,
             'attention_mode': _describe_attention_mode
         },
@@ -533,50 +439,24 @@ def _update_dit_config(
 
 def _update_vae_config(
     runner: 'VideoDiffusionInfer',
-    torch_compile_args: Optional[CompileConfig],
     debug: Optional['Debug'] = None
 ) -> bool:
-    """
-    Update VAE model configuration when reusing cached model.
-    
-    Compares new configuration settings against cached config to detect changes.
-    Handles torch.compile and tiling configuration updates with proper cleanup
-    and reapplication when settings change.
-    
-    Args:
-        runner: VideoDiffusionInfer instance with cached VAE model
-        torch_compile_args: New torch.compile configuration object with fields:
-            - backend: str - Compiler backend (default: "inductor")
-            - mode: str - Compilation mode (default: "default")
-            - fullgraph: bool - Require single graph compilation
-            - dynamic: bool - Enable dynamic shapes
-            - dynamo_cache_size_limit: int - Cache size limit
-            - dynamo_recompile_limit: int - Recompilation limit
-        debug: Debug instance for logging
-        
-    Returns:
-        bool: True if configuration was successfully updated
-    """
+    """Update VAE model configuration when reusing cached model."""
     new_tiling_config = getattr(runner, '_new_vae_tiling_config', None)
-    
     return _update_model_config(
         runner=runner,
         model_attr='vae',
         model_type='VAE',
         new_configs={
-            'torch_compile': torch_compile_args,
             'tiling': new_tiling_config
         },
         cached_config_attrs={
-            'torch_compile': '_vae_compile_args',
             'tiling': '_vae_tiling_config'
         },
         model_config_attrs={
-            'torch_compile': '_config_compile',
             'tiling': '_config_tiling'
         },
         config_describers={
-            'torch_compile': _describe_compile_config,
             'tiling': _describe_tiling_config
         },
         special_handlers=None,
@@ -648,8 +528,7 @@ def configure_runner(
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
     attention_mode: str = 'sdpa',
-    torch_compile_args_dit: Optional[CompileConfig] = None,
-    torch_compile_args_vae: Optional[CompileConfig] = None
+
 ) -> VideoDiffusionInfer:
     """
     Configure VideoDiffusionInfer runner with model loading and settings.
@@ -716,7 +595,6 @@ def configure_runner(
         encode_tiled, encode_tile_size, encode_tile_overlap,
         decode_tiled, decode_tile_size, decode_tile_overlap,
         tile_debug, attention_mode,
-        torch_compile_args_dit, torch_compile_args_vae,
         block_swap_config, debug
     )
     
@@ -740,8 +618,7 @@ def _configure_runner_settings(
     decode_tile_overlap: Optional[Tuple[int, int]],
     tile_debug: str,
     attention_mode: str,
-    torch_compile_args_dit: Optional[CompileConfig],
-    torch_compile_args_vae: Optional[CompileConfig],
+
     block_swap_config: Optional[BlockSwapConfig],
     debug: Optional['Debug'] = None
 ) -> None:
@@ -764,8 +641,7 @@ def _configure_runner_settings(
         decode_tile_overlap: Overlap dimensions (height, width) between decoding tiles
         tile_debug: Tile visualization mode (false/encode/decode)
         attention_mode: Attention computation backend ('sdpa', 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3')
-        torch_compile_args_dit: torch.compile configuration for DiT model or None
-        torch_compile_args_vae: torch.compile configuration for VAE model or None
+
         block_swap_config: BlockSwap configuration for DiT model or None
         debug: Debug instance (stored on runner for model access)
     """
@@ -780,8 +656,7 @@ def _configure_runner_settings(
     
     # Store the new configs temporarily for later comparison
     # Don't set them as attributes yet - let the update functions handle that
-    runner._new_dit_compile_args = torch_compile_args_dit
-    runner._new_vae_compile_args = torch_compile_args_vae
+
     runner._new_dit_block_swap_config = block_swap_config
     runner._new_dit_attention_mode = attention_mode
     runner._new_vae_tiling_config = {
@@ -845,36 +720,25 @@ def _setup_models(
     
     # Only update DiT config if model was cached/reused (not newly created)
     if not dit_created and hasattr(runner, 'dit') and runner.dit is not None:
-        _update_dit_config(runner, runner._new_dit_block_swap_config, 
-                         runner._new_dit_compile_args, runner._new_dit_attention_mode, debug)
+        _update_dit_config(runner, runner._new_dit_block_swap_config, runner._new_dit_attention_mode, debug)
     elif dit_created:
-        # For newly created models, just set initial config attributes (no comparison needed)
-        runner._dit_compile_args = runner._new_dit_compile_args
         runner._dit_block_swap_config = runner._new_dit_block_swap_config
         runner._dit_attention_mode = runner._new_dit_attention_mode
-        # Also store on model so config travels with the model when cached
         if hasattr(runner, 'dit') and runner.dit:
-            runner.dit._config_compile = runner._new_dit_compile_args
             runner.dit._config_swap = runner._new_dit_block_swap_config
             runner.dit._config_attn = runner._new_dit_attention_mode
-    
     # Setup VAE
     vae_created = _setup_vae_model(runner, cached_vae, vae_model, base_cache_dir, debug)
     
     # Only update VAE config if model was cached/reused (not newly created)
     if not vae_created and hasattr(runner, 'vae') and runner.vae is not None:
-        _update_vae_config(runner, runner._new_vae_compile_args, debug)
+        _update_vae_config(runner, debug)
     elif vae_created:
-        # For newly created models, just set initial config attributes (no comparison needed)
-        runner._vae_compile_args = runner._new_vae_compile_args
         runner._vae_tiling_config = runner._new_vae_tiling_config
-        # Also store on model so config travels with the model when cached
         if hasattr(runner, 'vae') and runner.vae:
-            runner.vae._config_compile = runner._new_vae_compile_args
             runner.vae._config_tiling = runner._new_vae_tiling_config
-    
     # Clean up temporary attributes
-    for attr in ['_new_dit_compile_args', '_new_vae_compile_args', '_new_dit_block_swap_config', '_new_dit_attention_mode', '_new_vae_tiling_config']:
+    for attr in ['_new_dit_block_swap_config', '_new_dit_attention_mode', '_new_vae_tiling_config']:
         if hasattr(runner, attr):
             delattr(runner, attr)
     
@@ -1113,12 +977,7 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
                 # Mark as active after successful application
                 runner._blockswap_active = True
         
-        # Apply torch.compile after BlockSwap (only if not already compiled)
-        # Check: model has _orig_mod attribute means it's already torch.compiled
-        if hasattr(runner, '_dit_compile_args') and runner._dit_compile_args and getattr(runner._dit_compile_args, 'dit', True):
-            if not hasattr(model, '_orig_mod'):
-                model = _apply_torch_compile(model, runner._dit_compile_args, "DiT", debug)
-        
+
         runner.dit = model
 
         # Clear the config application flag after successful application
@@ -1148,17 +1007,7 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             model.set_memory_limit(**config.vae.memory_limit)
             debug.end_timer("vae_set_memory_limit", "VAE memory limits configured")
 
-        # Apply torch.compile if configured (only if not already compiled)
-        if hasattr(runner, '_vae_compile_args') and runner._vae_compile_args and getattr(runner._vae_compile_args, 'vae', True):
-            # Check if encoder/decoder already compiled (have _orig_mod)
-            encoder_compiled = hasattr(model, 'encoder') and hasattr(model.encoder, '_orig_mod')
-            decoder_compiled = hasattr(model, 'decoder') and hasattr(model.decoder, '_orig_mod')
-            
-            if not (encoder_compiled and decoder_compiled):
-                model = _apply_vae_submodule_compile(model, runner._vae_compile_args, debug)
-            else:
-                debug.log("Reusing existing torch.compile for VAE submodules", category="reuse")
-        
+
         # Propagate debug and tensor_offload_device to submodules
         model.debug = debug
         model.tensor_offload_device = runner._tensor_offload_device
@@ -1170,184 +1019,6 @@ def apply_model_specific_config(model: torch.nn.Module, runner: VideoDiffusionIn
             runner._vae_config_needs_application = False
     
     return model
-
-
-def _configure_torch_compile(compile_args: CompileConfig, model_type: str,
-                            debug: Optional['Debug'] = None) -> Tuple[Dict[str, Any], bool]:
-    """
-    Extract and configure torch.compile settings with dependency validation.
-    
-    Centralizes common configuration logic for both full model and submodule compilation.
-    Validates that required dependencies (like Triton for inductor backend) are available
-    before attempting compilation to provide early, clear error messages.
-    
-    Args:
-        compile_args: Compilation configuration object
-        model_type: Model type string for logging (e.g., "DiT", "VAE")
-        debug: Debug instance for logging
-        
-    Returns:
-        Tuple of (compile_settings dict, success boolean)
-        compile_settings contains: backend, mode, fullgraph, dynamic
-        
-    Raises:
-        RuntimeError: If inductor backend is requested but Triton is not available
-    """
-    # Extract settings with defaults
-    settings = {
-        'backend': compile_args.backend,
-        'mode': compile_args.mode,
-        'fullgraph': compile_args.fullgraph,
-        'dynamic': compile_args.dynamic
-    }
-    
-    dynamo_cache_size_limit = compile_args.dynamo_cache_size_limit
-    dynamo_recompile_limit = compile_args.dynamo_recompile_limit
-    
-    # Check Triton availability for inductor backend BEFORE attempting compilation
-    if settings['backend'] == 'inductor':
-        if not TRITON_AVAILABLE:
-            error_msg = (
-                f"Cannot use torch.compile with 'inductor' backend: Triton is not installed.\n"
-                f"\n"
-                f"Triton is required for the inductor backend which performs kernel fusion and optimization.\n"
-                f"\n"
-                f"To fix this issue:\n"
-                f"  1. Install Triton: pip install triton\n"
-                f"  2. OR change backend to 'cudagraphs' (lightweight, no Triton needed)\n"
-                f"  3. OR disable torch.compile\n"
-                f"\n"
-                f"For more info: https://github.com/triton-lang/triton"
-            )
-            debug.log(error_msg, level="ERROR", category="setup", force=True)
-            raise RuntimeError(
-                "torch.compile with inductor backend requires Triton. "
-                "Install with: pip install triton"
-            )
-    
-    # Log compilation configuration
-    debug.log(f"Configuring torch.compile for {model_type}...", category="setup", force=True)
-    debug.log(f"Backend: {settings['backend']} | Mode: {settings['mode']} | "
-             f"Fullgraph: {settings['fullgraph']} | Dynamic: {settings['dynamic']}", 
-             category="setup", indent_level=1)
-    debug.log(f"Dynamo cache_size_limit: {dynamo_cache_size_limit} | "
-             f"recompile_limit: {dynamo_recompile_limit}", category="setup", indent_level=1)
-    
-    # Configure torch._dynamo settings
-    try:
-        import torch._dynamo
-        torch._dynamo.config.cache_size_limit = dynamo_cache_size_limit
-        torch._dynamo.config.recompile_limit = dynamo_recompile_limit
-        debug.log(f"torch._dynamo configured successfully", category="success", indent_level=1)
-        return settings, True
-    except Exception as e:
-        debug.log(f"Could not configure torch._dynamo settings: {e}", 
-                 level="WARNING", category="setup", force=True, indent_level=1)
-        return settings, False
-
-
-def _apply_torch_compile(model: torch.nn.Module, compile_args: CompileConfig,
-                        model_type: str, debug: Optional['Debug'] = None) -> torch.nn.Module:
-    """
-    Apply torch.compile to entire model with configured settings.
-    
-    Args:
-        model: Model to compile
-        compile_args: Compilation configuration
-        model_type: "DiT" or "VAE" for logging
-        debug: Debug instance
-        
-    Returns:
-        Compiled model, or original model if compilation fails
-    """
-    try:
-        # Configure compilation settings
-        settings, _ = _configure_torch_compile(compile_args, model_type, debug)
-        
-        # Compile entire model
-        debug.start_timer(f"{model_type.lower()}_compile")
-        compiled_model = torch.compile(model, **settings)
-        debug.end_timer(f"{model_type.lower()}_compile", 
-                       f"{model_type} model wrapped for compilation", force=True)
-        debug.log(f"Actual compilation will happen on first batch (expect initial delay, then speedup)", category="info", indent_level=1)
-        
-        return compiled_model
-        
-    except Exception as e:
-        debug.log(f"torch.compile failed for {model_type}: {e}", 
-                 level="WARNING", category="setup", force=True)
-        debug.log(f"Falling back to uncompiled model", 
-                 level="WARNING", category="setup", force=True, indent_level=1)
-        return model
-
-
-def _disable_compile_for_dynamic_modules(module: torch.nn.Module) -> None:
-    """
-    Mark modules with dynamic shapes to be excluded from torch.compile.
-    This prevents recompilation issues with variable tensor sizes.
-    """
-    for name, submodule in module.named_modules():
-        if isinstance(submodule, InflatedCausalConv3d):
-            # Mark module to skip compilation
-            submodule._dynamo_disable = True
-
-
-def _apply_vae_submodule_compile(model: torch.nn.Module, compile_args: CompileConfig,
-                                 debug: Optional['Debug'] = None) -> torch.nn.Module:
-    """
-    Apply torch.compile to VAE core submodules instead of entire model.
-    
-    The VAE's high-level encode/decode methods contain complex control flow
-    (temporal slicing, tiling, stateful memory management) that prevents 
-    torch.compile from optimizing effectively. Instead, we compile only the 
-    core neural networks (encoder, decoder) which have straightforward forward 
-    passes suitable for compilation.
-    
-    Note: quant_conv and post_quant_conv are disabled (None) in the current VAE 
-    architecture/yaml, so they are not compiled.
-    
-    Args:
-        model: VAE model instance
-        compile_args: Compilation configuration
-        debug: Debug instance
-        
-    Returns:
-        VAE model with compiled submodules
-    """
-    try:
-        # Configure compilation settings
-        settings, _ = _configure_torch_compile(compile_args, "VAE submodules", debug)
-        
-        # Compile submodules
-        compiled_modules = []
-        debug.start_timer("vae_submodule_compile")
-        
-        if hasattr(model, 'encoder') and model.encoder is not None:
-            # Disable compilation for InflatedCausalConv3d modules due to dynamic shapes
-            _disable_compile_for_dynamic_modules(model.encoder)
-            model.encoder = torch.compile(model.encoder, **settings)
-            compiled_modules.append('encoder')
-            debug.log(f"VAE encoder found and added to compilation queue", category="success", indent_level=1)
-
-        if hasattr(model, 'decoder') and model.decoder is not None:
-            # Disable compilation for InflatedCausalConv3d modules due to dynamic shapes  
-            _disable_compile_for_dynamic_modules(model.decoder)
-            model.decoder = torch.compile(model.decoder, **settings)
-            compiled_modules.append('decoder')
-            debug.log(f"VAE decoder found and added to compilation queue", category="success", indent_level=1)
-        
-        debug.end_timer("vae_submodule_compile", 
-                       f"VAE submodules compiled: {', '.join(compiled_modules)}", force=True)
-        debug.log(f"Actual compilation will happen on first batch (expect initial delay, then speedup)", category="info", indent_level=1)
-        
-        return model
-        
-    except Exception as e:
-        debug.log(f"torch.compile failed for VAE submodules: {e}", 
-                 level="WARNING", category="setup", force=True)
-        debug.log(f"Falling back to uncompiled VAE", 
-                 level="WARNING", category="setup", force=True, indent_level=1)
-        return model
 
 
 def _propagate_debug_to_modules(module: torch.nn.Module, debug: 'Debug') -> None:

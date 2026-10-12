@@ -6,7 +6,7 @@ import sys
 from collections.abc import Sequence
 
 from ..config import (
-    AppConfig, BlockSwapConfig, CacheConfig, CompileConfig, InferenceConfig,
+    AppConfig, BlockSwapConfig, CacheConfig, InferenceConfig,
     MemoryConfig, ModelConfig, OffloadConfig, OutputConfig, SamplingConfig,
     TileConfig, VAEConfig, VideoConfig,
 )
@@ -112,6 +112,8 @@ def _add_processing_group(parser: argparse.ArgumentParser) -> None:
                         help="Prepend N reversed frames to reduce start artifacts (auto-removed). Default: 0")
     process_group.add_argument("--temporal_overlap", type=int, default=0,
                         help="Frames to overlap between batches/chunks for smooth blending (default: 0)")
+    process_group.add_argument("--resume", action="store_true",
+                        help="Resume upscaling a long video from existing chunk checkpoints (saves time on Colab T4 disconnects)")
 
 
 def _add_quality_group(parser: argparse.ArgumentParser) -> None:
@@ -186,24 +188,6 @@ def _add_perf_group(parser: argparse.ArgumentParser) -> None:
     perf_group.add_argument("--attention_mode", type=str, default="sageattn_2",
                         choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
                         help="Attention backend: 'sageattn_2' (default, fast INT8/FP16), 'flash_attn_2' (Ampere/Ada/Hopper/L4), 'flash_attn_3', 'sageattn_3', or 'sdpa'")
-    perf_group.add_argument("--compile_dit", action="store_true",
-                        help="Enable torch.compile for DiT model (20-40%% speedup, requires PyTorch 2.0+ and Triton)")
-    perf_group.add_argument("--compile_vae", action="store_true",
-                        help="Enable torch.compile for VAE model (15-25%% speedup, requires PyTorch 2.0+ and Triton)")
-    perf_group.add_argument("--compile_backend", type=str, default="inductor", choices=["inductor", "cudagraphs"],
-                        help="Compilation backend: 'inductor' (full optimization with Triton) or 'cudagraphs' (lightweight, no kernel optimization) (default: inductor)")
-    perf_group.add_argument("--compile_mode", type=str, default="default", choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
-                        help="Optimization level: 'default' (fast compilation), 'reduce-overhead' (lower overhead), 'max-autotune' (best runtime, slow compilation), "
-                        "'max-autotune-no-cudagraphs' (like max-autotune without cudagraphs) (default: default)")
-    perf_group.add_argument("--compile_fullgraph", action="store_true",
-                        help="Compile entire model as single graph (faster but less flexible). May fail with dynamic shapes (default: False)")
-    perf_group.add_argument("--compile_dynamic", action="store_true",
-                        help="Handle varying input shapes without recompilation. Useful for different resolutions/batch sizes (default: False)")
-    perf_group.add_argument("--compile_dynamo_cache_size_limit", type=int, default=64,
-                        help="Max cached compiled versions per function. Increase when using many different input shapes. Higher uses more memory (default: 64)")
-    perf_group.add_argument("--compile_dynamo_recompile_limit", type=int, default=128,
-                        help="Max recompilation attempts before fallback to eager mode. Safety limit to prevent compilation loops (default: 128)")
-
 
 def _add_cache_group(parser: argparse.ArgumentParser) -> None:
     cache_group = parser.add_argument_group('Model caching (batch processing)')
@@ -298,16 +282,7 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
                 ),
                 debug=a.tile_debug,
             ),
-            compile=CompileConfig(
-                dit=a.compile_dit,
-                vae=a.compile_vae,
-                backend=a.compile_backend,
-                mode=a.compile_mode,
-                fullgraph=a.compile_fullgraph,
-                dynamic=a.compile_dynamic,
-                dynamo_cache_size_limit=a.compile_dynamo_cache_size_limit,
-                dynamo_recompile_limit=a.compile_dynamo_recompile_limit,
-            ),
+
             cache=CacheConfig(
                 dit=True if a.keep_on_vram else a.cache_dit,
                 vae=True if a.keep_on_vram else a.cache_vae,
@@ -325,6 +300,7 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
             chunk_size=a.chunk_size,
             skip_first_frames=a.skip_first_frames,
             load_cap=a.load_cap,
+            resume=a.resume,
         ),
         memory=MemoryConfig(
             ram_budget_gb=a.ram_budget_gb,

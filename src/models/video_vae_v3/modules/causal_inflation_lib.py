@@ -98,10 +98,15 @@ class InflatedCausalConv3d(Conv3d):
             getattr(torch.backends.cudnn, 'enabled', True)):
             try:
                 # Direct cuDNN call bypasses buggy PyTorch dispatch layer (NVIDIA only)
+                needs_cast = (weight.dtype == torch.bfloat16 and torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8)
+                inp = input.half() if needs_cast else input
+                wt = weight.half() if needs_cast else weight
                 out = torch.cudnn_convolution(
-                    input, weight, self.padding, self.stride, self.dilation, self.groups,
+                    inp, wt, self.padding, self.stride, self.dilation, self.groups,
                     benchmark=False, deterministic=False, allow_tf32=True
                 )
+                if needs_cast:
+                    out = out.to(input.dtype)
                 if bias is not None:
                     out += bias.reshape((1, -1) + (1,) * (out.ndim - 2))
                 return out

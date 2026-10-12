@@ -16,7 +16,7 @@ import torch
 
 from src.cli.arguments import parse_arguments
 from src.cli.bootstrap import configure_environment
-from src.config import BlockSwapConfig, CompileConfig, InferenceConfig, SamplingConfig
+from src.config import BlockSwapConfig, InferenceConfig, SamplingConfig
 from src.core import generation_utils, model_configuration, pipeline, scheduler
 from src.core.context import GenerationContext
 from src.core.session import InferenceSession
@@ -50,13 +50,12 @@ inference_cli.main(['--help'])
 
 def test_parser_returns_nested_immutable_settings():
     cfg = parse_arguments(['in.mov', '--batch_size', '9', '--chunk_size', '17',
-        '--compile_dit', '--compile_dynamic', '--compile_mode', 'reduce-overhead',
+        '--resume',
         '--vae_decode_tile_size', '512', '--cache_dit', '--cache_ram_gb', '2',
         '--blocks_to_swap', '8', '--video_backend', 'ffmpeg', '--10bit',
         '--output', 'out.mp4', '--skip_first_frames', '3', '--load_cap', '11'])
     assert cfg.inference.sampling.batch_size == 9
-    assert cfg.inference.compile.dit and cfg.inference.compile.dynamic
-    assert cfg.inference.compile.mode == 'reduce-overhead'
+    assert cfg.video.resume is True
     assert cfg.inference.vae.decode.size == 512
     assert cfg.inference.cache.dit and cfg.inference.cache.ram_gb == 2
     assert cfg.inference.swap.blocks_to_swap == 8
@@ -131,18 +130,12 @@ def test_generation_context_releases_owners_without_copying_storage():
         ctx.misspelled_field = 1
 
 
-def test_typed_blockswap_validation_and_compile_adapter(monkeypatch):
+def test_typed_blockswap_validation():
     swap = BlockSwapConfig(blocks_to_swap=4)
     assert is_blockswap_enabled(swap)
     assert validate_blockswap_config(swap, torch.device('cuda:0'), torch.device('cpu'), Debug(False)) is swap
     with pytest.raises(ValueError, match='invalid'):
         validate_blockswap_config(swap, torch.device('cuda:0'), torch.device('cuda:0'), Debug(False))
-    compile_config = CompileConfig(backend='cudagraphs', dynamic=True, dynamo_cache_size_limit=71)
-    # Keep the test's Dynamo settings local.
-    monkeypatch.setattr(torch._dynamo.config, 'cache_size_limit', torch._dynamo.config.cache_size_limit)
-    monkeypatch.setattr(torch._dynamo.config, 'recompile_limit', torch._dynamo.config.recompile_limit)
-    settings, ok = model_configuration._configure_torch_compile(compile_config, 'DiT', Debug(False))
-    assert ok and settings == dict(backend='cudagraphs', mode='default', fullgraph=False, dynamic=True)
 
 
 def test_typed_runner_configuration_reuses_models(tmp_path, monkeypatch):
@@ -150,16 +143,14 @@ def test_typed_runner_configuration_reuses_models(tmp_path, monkeypatch):
     monkeypatch.setattr(model_configuration, '_create_new_runner', lambda *a: runner)
     seen = []
     monkeypatch.setattr(model_configuration, '_setup_models', lambda r, dit, vae, *a: seen.append((dit, vae)))
-    cfg = CompileConfig(dit=True)
     swap = BlockSwapConfig()
     ctx = generation_utils.setup_generation_context(dit_device='cpu', vae_device='cpu')
     with InferenceSession() as session:
         for _ in range(2):
             actual = generation_utils.prepare_runner('dit', 'vae', str(tmp_path), Debug(False), ctx,
                 dit_cache=True, vae_cache=True, session=session,
-                block_swap_config=swap, torch_compile_args_dit=cfg)
+                block_swap_config=swap)
             assert actual is runner
-            assert runner._new_dit_compile_args is cfg
             assert runner._new_dit_block_swap_config is swap
     assert len(seen) == 2 and all(dit is not None and vae is not None for dit, vae in seen)
 

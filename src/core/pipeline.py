@@ -76,8 +76,7 @@ def iter_processed_batches(
                 decode_tile_overlap=(config.vae.decode.overlap, config.vae.decode.overlap),
                 tile_debug=config.vae.debug.lower() if config.vae.debug else "false",
                 attention_mode=config.attention_mode,
-                torch_compile_args_dit=config.compile if config.compile.dit else None,
-                torch_compile_args_vae=config.compile if config.compile.vae else None
+
             )
             runner._keep_on_vram = keep_on_vram
 

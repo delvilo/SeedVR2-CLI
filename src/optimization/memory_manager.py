@@ -922,8 +922,6 @@ def cleanup_dit(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
             debug.log("DiT model deleted", category="cleanup")
         
         # Clear DiT config attributes - not needed when model is not cached (will be recreated)
-        if hasattr(runner, '_dit_compile_args'):
-            delattr(runner, '_dit_compile_args')
         if hasattr(runner, '_dit_block_swap_config'):
             delattr(runner, '_dit_block_swap_config')
         if hasattr(runner, '_dit_attention_mode'):
@@ -992,8 +990,6 @@ def cleanup_vae(runner: Any, debug: Optional['Debug'] = None, cache_model: bool 
             debug.log("VAE model deleted", category="cleanup")
         
         # Clear VAE config attributes - not needed when model is not cached (will be recreated)
-        if hasattr(runner, '_vae_compile_args'):
-            delattr(runner, '_vae_compile_args')
         if hasattr(runner, '_vae_tiling_config'):
             delattr(runner, '_vae_tiling_config')
     

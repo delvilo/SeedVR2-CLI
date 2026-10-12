@@ -48,18 +48,6 @@ class VAEConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class CompileConfig:
-    dit: bool = False
-    vae: bool = False
-    backend: str = "inductor"
-    mode: str = "default"
-    fullgraph: bool = False
-    dynamic: bool = False
-    dynamo_cache_size_limit: int = 64
-    dynamo_recompile_limit: int = 128
-
-
-@dataclass(frozen=True, slots=True)
 class CacheConfig:
     dit: bool = False
     vae: bool = False
@@ -80,17 +68,18 @@ class InferenceConfig:
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     offload: OffloadConfig = field(default_factory=OffloadConfig)
     vae: VAEConfig = field(default_factory=VAEConfig)
-    compile: CompileConfig = field(default_factory=CompileConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     swap: BlockSwapConfig = field(default_factory=BlockSwapConfig)
     attention_mode: str = "sageattn_2"
     keep_on_vram: bool = False
+
 
 @dataclass(frozen=True, slots=True)
 class VideoConfig:
     chunk_size: int = 0
     skip_first_frames: int = 0
     load_cap: int = 0
+    resume: bool = False
 
 
 @dataclass(frozen=True, slots=True)

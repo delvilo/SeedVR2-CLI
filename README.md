@@ -1,12 +1,13 @@
 # SeedVR2-cli — standalone CLI
 
-SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
+SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and resumable long video processing across sessions.
 **Key Improvements & Fixes**:
 - **Zero OOM on Colab Free T4 GPU / CPU**: Resolves upstream OOM crashes through automatic multi-level VAE tiling (down to 128px), causal 3D convolution slicing, and transactional OOM recovery with dynamic BlockSwap.
 - **Pre-flight VRAM Capacity Check**: Validates available GPU memory before downloading weights or allocating buffers; terminates early with helpful recommendations instead of crashing mid-run.
 - **TorchCodec Native Video Decoding**: Completely removes `torchvision` and `torchaudio` dependencies; adopts high-throughput PyTorch `TorchCodec` for direct tensor decoding and pure PyTorch functional image transforms.
 - **GPU-Adaptive Attention**: Automatically selects SageAttention 2 on SM ≥ 8.0 (Ampere/Ada/Hopper/L4) and falls back to PyTorch SDPA on SM 7.5 (T4) where the SageAttention Triton kernel is unsupported.
 - **Tested on Colab T4 (15 GB) and L4 (22 GB)**: See benchmark results below.
+- **Resumable Long Video Upscaling (`--resume`)**: Enables upscaling arbitrarily long videos on Google Colab free tier (Tesla T4) across disconnections and timeouts. Saves chunk-level checkpoints and losslessly stitches completed segments into final MP4 in < 1 second using FFmpeg concat demuxer.
 
 [English](README.md) | [中文說明檔](README_zh.md)
 
@@ -67,7 +68,7 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --cache_ram_gb / --cache_vram_gb | Limit retained model storage; 0 disables that cache tier. |
 | --memory_report / --oom_retries | Record phase peaks to JSONL; retry caught OOMs with smaller workloads. |
 | --attention_mode | PyTorch SDPA is the default. Optional Flash/Sage backends require separate compatible installations. |
-| --compile_dit / --compile_vae | Enable torch.compile; first-run compilation can take time. |
+| --resume | Resume an interrupted long video upscale from existing chunk checkpoints. |
 | --video_backend ffmpeg / --10bit | Encode MP4 using FFmpeg, optionally with 10-bit x265 output. |
 | --debug | Show environment, timing, VRAM, and processing details. |
 | --cuda_device | Select one visible CUDA device index; defaults to device 0. |
@@ -103,7 +104,7 @@ Measured on Google Colab L4 upscaling video from 640×360 to **1080p (1920×1080
 | **7B Q8 Batch 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | ✅ | 14.75 GB | 13.20 s (1.46s/f) | 96.11 s |
 | **7B FP16 Offload** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ❌ (Offload) | 13.42 GB | 29.37 s | 101.83 s |
 | **7B FP16 Resident** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ✅ | 20.41 GB | 8.90 s | **63.67 s** |
-| **3B Q4 Compiled** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (`--compile_dit`) | 5.01 GB | 113.44 s | 172.62 s (17× slower) |
+
 
 #### Large Models Analysis (7B Q8_0 & 7B FP16 on L4 GPU)
 - **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**: Fully compatible with `--keep_on_vram` up to `--batch_size 9` (14.75 GB peak VRAM). Delivers visual fidelity virtually indistinguishable from FP16 while maintaining a comfortable 7 GB safety margin on L4's 22 GB.

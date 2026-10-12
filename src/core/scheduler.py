@@ -112,6 +112,10 @@ def write_file_attempt(job: FileJob, temporary_path: str, device: str,
 
 
 def process_file(job: FileJob, device: str, session: InferenceSession, debug: Debug) -> int:
+    if job.kind == 'video' and job.config.video.resume and job.config.output.format != 'png':
+        from .resumable import process_resumable_video
+        return process_resumable_video(job, device, session, debug)
+
     width, height = probe_dimensions(job.source, job.kind, debug)
     if min(width, height) <= 0:
         raise ValueError(f'Invalid media dimensions: {width}x{height}')

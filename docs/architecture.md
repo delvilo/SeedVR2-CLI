@@ -20,6 +20,7 @@ when imported.
 | `src/core/pipeline.py` | Run encode, upscale and streamed decode/postprocess for one input window. |
 | `src/core/streaming.py` | Finalize decoded overlap and yield bounded output batches. |
 | `src/core/context.py` | Explicit mutable `GenerationContext` fields for one invocation's tensors and metadata. Supports `keep_on_vram` flag for GPU resident pipelines. |
+| `src/core/resumable.py` | Manage chunk checkpoints, manifest state, and seamless FFmpeg concat demuxer assembly for resumable long video processing across sessions. |
 
 Dependencies flow from the CLI to scheduling, media and sessions. Core inference
 never imports the CLI or reads `sys.argv`. Model class imports are deferred until
@@ -43,10 +44,7 @@ session. Streaming creates a shallow context view for each finalized batch and
 copies only the small alpha-reference lists when necessary. It does not copy
 video tensors or accumulate whole-video output.
 
-BlockSwap and compilation settings remain typed down to their adapters. Small
-model metadata dictionaries and the keyword dictionary passed to `torch.compile`
-remain local implementation details; the model's OmegaConf configuration remains
-its native format.
+BlockSwap settings remain typed down to their adapters. The model's OmegaConf configuration remains its native format.
 
 ## Failure and resource lifetime
 

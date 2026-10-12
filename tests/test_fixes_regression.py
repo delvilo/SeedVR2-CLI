@@ -151,3 +151,24 @@ def test_cli_keep_on_vram_flags():
     assert cfg.inference.cache.dit is True
     assert cfg.inference.cache.vae is True
     assert cfg.inference.swap.blocks_to_swap == 0
+
+def test_resumable_manifest_and_assembly(tmp_path):
+    from src.core.resumable import (
+        get_resume_dir, load_resume_manifest, save_resume_manifest, assemble_chunks
+    )
+    out_video = tmp_path / "final.mp4"
+    chunks_dir = get_resume_dir(str(out_video))
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+    assert load_resume_manifest(chunks_dir) is None
+
+    manifest = {
+        "source": "input.mp4",
+        "destination": str(out_video),
+        "chunks": [{"chunk_idx": 1, "frames": 5, "file": "chunk_00001.mp4"}],
+        "completed_frames": 5
+    }
+    save_resume_manifest(chunks_dir, manifest)
+    loaded = load_resume_manifest(chunks_dir)
+    assert loaded is not None
+    assert loaded["completed_frames"] == 5
+    assert len(loaded["chunks"]) == 1

@@ -220,7 +220,7 @@ class Debug:
         """Print the footer with links - always displayed"""
         self.log("", category="none", force=True)
         self.log("────────────────────────", category="none", force=True)
-        self.log("https://github.com/delvilo/SeedVR2Lite_VideoUpscaler", category="starlove", force=True)
+        self.log("https://github.com/delvilo/SeedVR2-CLI.git", category="starlove", force=True)
     
     @torch._dynamo.disable  # Skip tracing to avoid time.time() warnings
     def start_timer(self, name: str, force: bool = False) -> None:
