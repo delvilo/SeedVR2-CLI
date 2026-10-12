@@ -138,54 +138,58 @@ def detect_edges_batch(
     Returns:
         Edge map tensor of shape (T, 1, H, W) in range [0, 1]
     """
-    # Convert to float32 for OpenCV processing (will be converted to numpy anyway)
+    T, C, H, W = images.shape
+    orig_dtype = images.dtype
+    orig_device = images.device
+
+    if method == 'sobel':
+        # Fast GPU native Sobel using F.conv2d with reflect padding (zero CPU transfer)
+        img = images.float()
+        if img.min() < 0:
+            img = (img + 1.0) * 0.5
+        img = img.clamp(0.0, 1.0)
+
+        if C == 3:
+            # Rec. 601 RGB to grayscale luminance weights
+            weights = torch.tensor([0.299, 0.587, 0.114], dtype=torch.float32, device=orig_device).view(1, 3, 1, 1)
+            gray = (img * weights).sum(dim=1, keepdim=True) * 255.0
+        else:
+            gray = img[:, :1, :, :] * 255.0
+
+        sobel_x = torch.tensor([[-1., 0., 1.],
+                                [-2., 0., 2.],
+                                [-1., 0., 1.]], dtype=torch.float32, device=orig_device).view(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1., -2., -1.],
+                                [ 0.,  0.,  0.],
+                                [ 1.,  2.,  1.]], dtype=torch.float32, device=orig_device).view(1, 1, 3, 3)
+
+        padded = F.pad(gray, (1, 1, 1, 1), mode="reflect")
+        gx = F.conv2d(padded, sobel_x)
+        gy = F.conv2d(padded, sobel_y)
+        edge = torch.sqrt(gx.pow(2) + gy.pow(2))
+
+        # Normalize per frame to [0, 1], matching OpenCV edge / edge.max()
+        max_val = edge.amax(dim=(-2, -1), keepdim=True).clamp(min=1e-8)
+        edges = (edge / max_val).to(dtype=orig_dtype)
+        return edges
+
+    # Fallback for canny (OpenCV CPU)
     images, images_dtype = ensure_float32_precision(images, force_float32=True)
-    
     images_np = images.cpu().numpy()
-    T, C, H, W = images_np.shape
-    
-    # Denormalize if needed
     if images_np.min() < 0:
         images_np = (images_np + 1) / 2
-    
-    # Convert to 0-255 uint8
     images_np = (images_np * 255).clip(0, 255).astype(np.uint8)
-    
+
     edges = []
     for t in range(T):
         frame = images_np[t].transpose(1, 2, 0)
-        
-        if C == 3:
-            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        else:
-            gray = frame[..., 0]
-        
-        if method == 'sobel':
-            sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-            sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-            edge = np.sqrt(sobelx**2 + sobely**2)
-            edge = (edge / max(float(edge.max()), 1e-8) * 255).astype(np.uint8)
-        else:
-            edge = cv2.Canny(gray, 50, 150)
-        
+        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY) if C == 3 else frame[..., 0]
+        edge = cv2.Canny(gray, 50, 150)
         edges.append(edge)
-    
-    edges = np.stack(edges)
-    edges = torch.from_numpy(edges).float() / 255.0
-    edges = edges.unsqueeze(1)
-    
-    # Move back to images device after CPU numpy processing
-    edges = manage_tensor(
-        tensor=edges,
-        target_device=images.device,
-        tensor_name="edge_map",
-        dtype=images_dtype,
-        debug=debug,
-        reason="edge detection result",
-        indent_level=1
-    )
-    
-    return edges
+
+    edges_np = np.stack(edges)
+    edges_tensor = torch.from_numpy(edges_np).float() / 255.0
+    return edges_tensor.unsqueeze(1).to(device=orig_device, dtype=orig_dtype)
 
 
 def guided_filter_pytorch(guide: torch.Tensor, src: torch.Tensor, 

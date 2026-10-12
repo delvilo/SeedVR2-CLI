@@ -141,7 +141,7 @@ class Debug:
         self.log("╚══════╝╚══════╝╚══════╝╚═════╝   ╚═══╝  ╚═╝  ╚═╝    ╚══════╝  ╚═╝ ╚══════╝", category="none", force=True, indent_level=1)
         # Version and credits - left/right aligned to logo width
         version_text = f"v{__version__}"
-        left_part = f"💻 CLI · {version_text}"
+        left_part = f"💻 SeedVR2-cli · {version_text}"
         right_part = "© NumZ · AInVFX"
         logo_width = 75
         padding = logo_width - len(left_part) - len(right_part) - 1

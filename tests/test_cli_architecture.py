@@ -70,7 +70,7 @@ def test_parser_returns_nested_immutable_settings():
 
 @pytest.mark.parametrize('argv', [
     ['--cuda_device', '0,1'], ['--cuda_device', '-1'], ['--batch_size', '4'],
-    ['--ram_budget_gb', 'nan'], ['--chunk_size', '-1'], ['--10bit'],
+    ['--ram_budget_gb', 'nan'], ['--chunk_size', '-1'], ['--video_backend', 'opencv', '--10bit'],
 ])
 def test_parser_rejects_invalid_requests_before_loading_models(argv):
     with pytest.raises(SystemExit) as error:

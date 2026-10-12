@@ -1,4 +1,4 @@
-# SeedVR2 Lite — standalone CLI
+# SeedVR2-cli — standalone CLI
 
 SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
 

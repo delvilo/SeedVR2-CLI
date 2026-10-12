@@ -212,7 +212,7 @@ def save_frames_to_video(
     output_path: str,
     fps: float = 30.0,
     writer: cv2.VideoWriter | FFMPEGVideoWriter | None = None,
-    video_backend: str = "opencv",
+    video_backend: str = "ffmpeg",
     use_10bit: bool = False,
     *, debug: Debug
 ) -> cv2.VideoWriter | FFMPEGVideoWriter:
@@ -241,7 +241,12 @@ def save_frames_to_video(
         debug.log(f"Saving {T} frames to video: {output_path} (backend={video_backend})", category="file")
         os.makedirs(Path(output_path).parent, exist_ok=True)
         if video_backend == "ffmpeg":
-            writer = FFMPEGVideoWriter(output_path, W, H, fps, use_10bit)
+            try:
+                writer = FFMPEGVideoWriter(output_path, W, H, fps, use_10bit)
+            except Exception as exc:
+                debug.log(f"FFmpeg writer failed ({exc}), falling back to OpenCV VideoWriter", level="WARNING", category="file")
+                fourcc = cv2.VideoWriter.fourcc(*'mp4v')
+                writer = cv2.VideoWriter(output_path, fourcc, fps, (W, H))
         else:
             fourcc = cv2.VideoWriter.fourcc(*'mp4v')
             writer = cv2.VideoWriter(output_path, fourcc, fps, (W, H))

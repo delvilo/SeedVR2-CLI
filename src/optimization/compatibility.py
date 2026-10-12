@@ -7,6 +7,7 @@ Extracted from: seedvr2.py (lines 1045-1630)
 
 import types
 import torch
+import torch.nn.functional as F
 import os
 
 
@@ -154,6 +155,14 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
     # SageAttention 2
     if requested_mode == 'sageattn_2':
         if SAGE_ATTN_2_AVAILABLE:
+            if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
+                if debug:
+                    debug.log(
+                        "SageAttention 2 Triton kernel requires Compute Capability >= 8.0 (Ampere/Ada/Hopper/L4);\n"
+                        "falling back to PyTorch SDPA on SM 7.5 (Tesla T4).",
+                        category="setup"
+                    )
+                return 'sdpa'
             return requested_mode
         error_msg = (
             "Cannot use 'sageattn_2' attention mode: SageAttention is not installed.\n"
@@ -274,6 +283,23 @@ def call_flash_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, 
         **fa3_kwargs
     )[0]
 
+def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None, **kwargs):
+    """Fallback PyTorch scaled dot-product attention for variable-length sequences."""
+    q_splits = list(torch.tensor_split(q, cu_seqlens_q[1:-1].long().cpu(), dim=0))
+    k_splits = list(torch.tensor_split(k, cu_seqlens_k[1:-1].long().cpu(), dim=0))
+    v_splits = list(torch.tensor_split(v, cu_seqlens_k[1:-1].long().cpu(), dim=0))
+    causal = kwargs.get('causal', False)
+    dropout_p = kwargs.get('dropout_p', 0.0)
+    output_splits = []
+    for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
+        q_i = q_i.permute(1, 0, 2).unsqueeze(0)
+        k_i = k_i.permute(1, 0, 2).unsqueeze(0)
+        v_i = v_i.permute(1, 0, 2).unsqueeze(0)
+        output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=dropout_p, is_causal=causal)
+        output_i = output_i.squeeze(0).permute(1, 0, 2)
+        output_splits.append(output_i)
+    return torch.cat(output_splits, dim=0)
+
 
 @torch._dynamo.disable
 def call_sage_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
@@ -326,13 +352,19 @@ def call_sage_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, m
     is_causal = kwargs.get('causal', False)
     sm_scale = 1.0 / (q.shape[-1] ** 0.5)
     
-    out = sageattn_varlen(
-        q, k, v,
-        cu_seqlens_q, cu_seqlens_k,
-        max_seqlen_q, max_seqlen_k,
-        is_causal, sm_scale
-    )
-    
+    try:
+        out = sageattn_varlen(
+            q, k, v,
+            cu_seqlens_q, cu_seqlens_k,
+            max_seqlen_q, max_seqlen_k,
+            is_causal, sm_scale
+        )
+    except Exception:
+        out = pytorch_varlen_attention(
+            q, k, v, cu_seqlens_q, cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
+            **kwargs
+        )
     return out.to(out_dtype) if out.dtype != out_dtype else out
 
 

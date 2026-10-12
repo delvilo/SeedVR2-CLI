@@ -83,7 +83,7 @@ class InferenceConfig:
     compile: CompileConfig = field(default_factory=CompileConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     swap: BlockSwapConfig = field(default_factory=BlockSwapConfig)
-    attention_mode: str = "sdpa"
+    attention_mode: str = "sageattn_2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,7 +105,7 @@ class MemoryConfig:
 class OutputConfig:
     path: str | None = None
     format: Literal["mp4", "png"] | None = None
-    video_backend: Literal["opencv", "ffmpeg"] = "opencv"
+    video_backend: Literal["opencv", "ffmpeg"] = "ffmpeg"
     use_10bit: bool = False
 
 

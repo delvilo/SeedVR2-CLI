@@ -41,7 +41,8 @@ Examples:
 """
 
     parser = argparse.ArgumentParser(
-        description="SeedVR2 Video Upscaler - CLI for high-quality image/video upscaling and batch processing",
+        prog="seedvr2-cli",
+        description="SeedVR2-cli - High-performance command-line image/video upscaler",
         epilog=usage_examples,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         allow_abbrev=False
@@ -70,8 +71,8 @@ def _add_io_group(parser: argparse.ArgumentParser) -> None:
                         help="Output path (default: beside the input with an _upscaled suffix)")
     io_group.add_argument("--output_format", type=str, default=None, choices=["mp4", "png", None],
                         help="Output format: 'mp4' (video) or 'png' (image sequence). Default: auto-detect from input type")
-    io_group.add_argument("--video_backend", type=str, default="opencv", choices=["opencv", "ffmpeg"],
-                        help="Video encoder backend: 'opencv' (default) or 'ffmpeg' (requires ffmpeg in PATH)")
+    io_group.add_argument("--video_backend", type=str, default="ffmpeg", choices=["opencv", "ffmpeg"],
+                        help="Video encoder backend: 'ffmpeg' (default, recommended) or 'opencv'")
     io_group.add_argument("--10bit", dest="use_10bit", action="store_true",
                         help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
                              "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
@@ -178,9 +179,9 @@ def _add_vae_group(parser: argparse.ArgumentParser) -> None:
 
 def _add_perf_group(parser: argparse.ArgumentParser) -> None:
     perf_group = parser.add_argument_group('Performance optimization')
-    perf_group.add_argument("--attention_mode", type=str, default="sdpa",
+    perf_group.add_argument("--attention_mode", type=str, default="sageattn_2",
                         choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
-                        help="Attention backend: 'sdpa' (default), 'flash_attn_2', 'flash_attn_3', 'sageattn_2', or 'sageattn_3' (Blackwell GPUs)")
+                        help="Attention backend: 'sageattn_2' (default, fast INT8/FP16), 'flash_attn_2' (Ampere/Ada/Hopper/L4), 'flash_attn_3', 'sageattn_3', or 'sdpa'")
     perf_group.add_argument("--compile_dit", action="store_true",
                         help="Enable torch.compile for DiT model (20-40%% speedup, requires PyTorch 2.0+ and Triton)")
     perf_group.add_argument("--compile_vae", action="store_true",

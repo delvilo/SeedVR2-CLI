@@ -1,4 +1,4 @@
-# SeedVR2 Lite — 獨立 CLI 影像與影片超解析度放大工具
+# SeedVR2-cli — 獨立 CLI 影像與影片超解析度放大工具
 
 SeedVR2 是基於 Linux 命令列的影像與影片超解析度放大工具。推理管線採用單張 NVIDIA GPU 運行，並支援 CPU 平行計算進行卸載（Offload）與前處理，具備目錄批次處理、有限視訊流式傳輸、模型記憶體復用、VAE Tiling 分塊編解碼、DiT BlockSwap 區塊交換，以及可選的 torch.compile 加速。
 

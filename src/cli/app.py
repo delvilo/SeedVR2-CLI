@@ -36,7 +36,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         debug.log(f'Configuration: {config}', category='setup')
         debug.log(f'Using CUDA device: {selected} (visible as cuda:0)', category='device')
         if config.output.video_backend == 'ffmpeg' and shutil.which('ffmpeg') is None:
-            raise RuntimeError('--video_backend ffmpeg requires ffmpeg in PATH')
+            debug.log('FFmpeg not found in PATH; falling back to OpenCV video writer', level='WARNING', category='setup')
+            config = replace(config, output=replace(config.output, video_backend='opencv'))
         started = time.monotonic()
         import torch
         from ..utils.model_registry import get_min_vram

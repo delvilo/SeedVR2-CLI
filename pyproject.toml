@@ -1,6 +1,6 @@
 [project]
-name = "seedvr2_videoupscaler"
-description = "SeedVR2 command-line video and image upscaling for Linux CUDA"
+name = "SeedVR2-cli"
+description = "SeedVR2-cli standalone command-line video and image upscaler for Linux CUDA"
 version = "2.6.0"
 requires-python = "==3.13.*"
 authors = [
