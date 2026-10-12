@@ -50,6 +50,8 @@ def plan_file(config: AppConfig, width: int, height: int, device: str,
             swap = replace(swap, blocks_to_swap=min(blocks, max(swap.blocks_to_swap, needed)))
             if swap.blocks_to_swap:
                 offload = replace(offload, dit='cpu')
+        if swap.blocks_to_swap >= blocks - 2:
+            swap = replace(swap, swap_io_components=True)
         dit_resident = int(weights[0] * max(.1, 1 - swap.blocks_to_swap / blocks))
         session.ram_cache_bytes = 0
         session.vram_cache_bytes = 0

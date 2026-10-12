@@ -99,7 +99,7 @@ def validate_blockswap_config(
             f"BlockSwap enabled ({', '.join(config_details)}) but dit_offload_device is invalid. "
             f"Current: device='{dit_device}', dit_offload_device='{offload_str}'. "
             f"BlockSwap requires offload_device on the DiT Model to be set and different from device. "
-            f"Set --dit_offload_device cpu or disable BlockSwap."
+            f"Use --memory_policy staged or disable BlockSwap."
         )
     
     return block_swap_config

@@ -76,7 +76,7 @@ python inference_cli.py input.mp4 \
 # 3. 低顯存極限配置 (例如 8GB 顯卡或 Colab T4 跑 7B 模型)
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
-  --blocks_to_swap 32 --swap_io_components \
+  --blocks_to_swap 32 \
   --memory_policy staged \
   --resolution 1080
 

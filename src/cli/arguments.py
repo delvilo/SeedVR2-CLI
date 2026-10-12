@@ -31,7 +31,7 @@ Examples:
     python {invocation} long_video.mp4 --resolution 1080 --batch_size 33 --chunk_size 330 --temporal_overlap 3 --video_backend ffmpeg --10bit
 
   Memory-optimized for low VRAM (8GB / Colab T4):
-    python {invocation} image.png --dit_model seedvr2_ema_3b-Q8_0.gguf --blocks_to_swap 32 --swap_io_components --memory_policy staged
+    python {invocation} image.png --dit_model seedvr2_ema_3b-Q8_0.gguf --blocks_to_swap 32 --memory_policy staged
   High resolution upscaling (automatic VAE tiling):
     python {invocation} video.mp4 --resolution 1440 --batch_size 33 --uniform_batch_size --temporal_overlap 3
 
@@ -149,10 +149,7 @@ def _add_blockswap_group(parser: argparse.ArgumentParser) -> None:
     blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
     blockswap_group.add_argument("--blocks_to_swap", type=int, default=0,
                         help="Requested minimum blocks to swap for VRAM savings. 0-32 (3B) or 0-36 (7B). "
-                             "The planner/retry policy may increase it. Default: 0")
-    blockswap_group.add_argument("--swap_io_components", action="store_true",
-                        help="Offload DiT I/O layers for extra VRAM savings. Requires --dit_offload_device")
-
+                             "The planner automatically enables I/O component offloading when swapping all blocks. Default: 0")
 
 def _add_vae_group(parser: argparse.ArgumentParser) -> None:
     vae_group = parser.add_argument_group('VAE diagnostics')
@@ -243,7 +240,7 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
             cache=CacheConfig(),
             swap=BlockSwapConfig(
                 blocks_to_swap=0 if a.memory_policy == "resident" else a.blocks_to_swap,
-                swap_io_components=False if a.memory_policy == "resident" else a.swap_io_components,
+                swap_io_components=False,
             ),
             attention_mode=a.attention_mode,
             memory_policy=a.memory_policy,

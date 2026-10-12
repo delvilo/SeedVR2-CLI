@@ -71,3 +71,14 @@ def test_apply_block_swap_and_cleanup():
     # Test cleanup
     cleanup_blockswap(runner, keep_state_for_cache=False)
     assert not runner._blockswap_active
+
+def test_automated_swap_io_components_in_planning():
+    from src.cli.arguments import parse_arguments
+    from src.core.planning import plan_file
+    from src.core.session import InferenceSession
+    # Passing high blocks_to_swap=32 automatically sets swap_io_components=True in planning
+    cfg = parse_arguments(["dummy.mp4", "--blocks_to_swap", "32", "--memory_policy", "staged"])
+    with InferenceSession() as session:
+        planned = plan_file(cfg, 640, 360, "cpu", session, Debug(False))
+    assert planned.inference.swap.blocks_to_swap >= 30
+    assert planned.inference.swap.swap_io_components is True
