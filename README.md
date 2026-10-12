@@ -113,25 +113,25 @@ Use --help for the complete option list. Larger models, batches, and output reso
 
 Measured on Google Colab L4 upscaling video from 640×360 to **1080p (1920×1080)**. SageAttention 2 is the default attention backend on L4 (SM 8.9).
 
-| Configuration | Model | Batch Size | `--keep_on_vram` | Peak VRAM | DiT Time | Total Time |
+| Configuration | Model | Batch Size | `--memory_policy` | Peak VRAM | DiT Time | Total Time |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **3B Q4 Baseline** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (Offload) | 5.01 GB | 7.95 s | 62.88 s |
-| **3B Q4 Fast** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ✅ | 6.94 GB | 6.59 s | **55.84 s** |
-| **3B Q4 Batch 9** | `seedvr2_ema_3b-Q4_K_M.gguf` | 9 | ✅ | 8.39 GB | 9.05 s (1.0s/f) | 89.20 s |
-| **3B Q4 Batch 13** | `seedvr2_ema_3b-Q4_K_M.gguf` | 13 | ✅ | 8.46 GB | 11.48 s (**0.88s/f**) | 122.86 s |
-| **7B Q4 Balance** | `seedvr2_ema_7b-Q4_K_M.gguf` | 5 | ✅ | 9.49 GB | 9.94 s | 72.66 s |
-| **7B Q4 Batch 9** | `seedvr2_ema_7b-Q4_K_M.gguf` | 9 | ✅ | 10.95 GB | 13.61 s (1.5s/f) | 95.80 s |
-| **7B Q8 High-Q** | `seedvr2_ema_7b-Q8_0.gguf` | 5 | ✅ | 13.29 GB | 9.60 s | 84.79 s |
-| **7B Q8 Batch 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | ✅ | 14.75 GB | 13.20 s (1.46s/f) | 96.11 s |
-| **7B FP16 Offload** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ❌ (Offload) | 13.42 GB | 29.37 s | 101.83 s |
-| **7B FP16 Resident** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ✅ | 20.41 GB | 8.90 s | **63.67 s** |
+| **3B Q4 Baseline** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | `staged` | 5.01 GB | 7.95 s | 62.88 s |
+| **3B Q4 Fast** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | `resident` | 6.94 GB | 6.59 s | **55.84 s** |
+| **3B Q4 Batch 9** | `seedvr2_ema_3b-Q4_K_M.gguf` | 9 | `resident` | 8.39 GB | 9.05 s (1.0s/f) | 89.20 s |
+| **3B Q4 Batch 13** | `seedvr2_ema_3b-Q4_K_M.gguf` | 13 | `resident` | 8.46 GB | 11.48 s (**0.88s/f**) | 122.86 s |
+| **7B Q4 Balance** | `seedvr2_ema_7b-Q4_K_M.gguf` | 5 | `resident` | 9.49 GB | 9.94 s | 72.66 s |
+| **7B Q4 Batch 9** | `seedvr2_ema_7b-Q4_K_M.gguf` | 9 | `resident` | 10.95 GB | 13.61 s (1.5s/f) | 95.80 s |
+| **7B Q8 High-Q** | `seedvr2_ema_7b-Q8_0.gguf` | 5 | `resident` | 13.29 GB | 9.60 s | 84.79 s |
+| **7B Q8 Batch 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | `resident` | 14.75 GB | 13.20 s (1.46s/f) | 96.11 s |
+| **7B FP16 Offload** | `seedvr2_ema_7b_fp16.safetensors` | 5 | `staged` | 13.42 GB | 29.37 s | 101.83 s |
+| **7B FP16 Resident** | `seedvr2_ema_7b_fp16.safetensors` | 5 | `resident` | 20.41 GB | 8.90 s | **63.67 s** |
 
 
 #### Large Models Analysis (7B Q8_0 & 7B FP16 on L4 GPU)
-- **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**: Fully compatible with `--keep_on_vram` up to `--batch_size 9` (14.75 GB peak VRAM). Delivers visual fidelity virtually indistinguishable from FP16 while maintaining a comfortable 7 GB safety margin on L4's 22 GB.
+- **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**: Fully compatible with `--memory_policy resident` up to `--batch_size 9` (14.75 GB peak VRAM). Delivers visual fidelity virtually indistinguishable from FP16 while maintaining a comfortable 7 GB safety margin on L4's 22 GB.
 - **`seedvr2_ema_7b_fp16.safetensors` (~15.8 GB)**:
-  - **With `--keep_on_vram`**: Works smoothly at `--batch_size 5` and 1080p (20.41 GB peak VRAM). Do **not** use `--batch_size 9` with `--keep_on_vram`, as the pre-flight check will detect that ~22.6 GB is needed and safely abort to prevent OOM.
-  - **Without `--keep_on_vram`**: Runs with standard CPU offload across all batch sizes.
+  - **With `--memory_policy resident`**: Works smoothly at `--batch_size 5` and 1080p (20.41 GB peak VRAM). Do **not** use `--batch_size 9` with `resident`, as the pre-flight check will detect that ~22.6 GB is needed and safely abort to prevent OOM.
+  - **With `--memory_policy staged`**: Runs with standard CPU offload across all batch sizes.
 
 #### 4 Optimal Parameter Configurations for L4 GPU
 
