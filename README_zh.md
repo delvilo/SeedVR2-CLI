@@ -73,18 +73,17 @@ python inference_cli.py input.mp4 \
   --temporal_overlap 3 --video_backend ffmpeg \
   --output output.mp4
 
-# 3. 低顯存極限配置 (例如 8GB 顯卡或 Colab 跑 7B 模型)
+# 3. 低顯存極限配置 (例如 8GB 顯卡或 Colab T4 跑 7B 模型)
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
   --blocks_to_swap 32 --swap_io_components \
-  --dit_offload_device cpu --vae_offload_device cpu \
+  --memory_policy staged \
   --resolution 1080
 
 # 4. 目錄批次處理 (開啟模型跨檔復用)
 python inference_cli.py media_folder/ \
   --output processed/ \
-  --cache_dit --cache_vae \
-  --dit_offload_device cpu --vae_offload_device cpu
+  --memory_policy staged
 ```
 
 ---
@@ -99,9 +98,9 @@ python inference_cli.py media_folder/ \
 | `--chunk_size` | 單次加載的輸入最大訊框數（0 為自動記憶體規劃，最多 33 幀）。 |
 | `--vae_encode_tiled` / `--vae_decode_tiled` | 啟用 VAE 分塊處理，大幅降低高解析度放大時的顯存消耗（預設啟用）。 |
 | `--blocks_to_swap` | BlockSwap 卸載至系統 RAM 的變壓器層數量（3B 最多 32 層，7B 最多 36 層）。 |
-| `--dit_offload_device cpu` | 當 DiT 空閒時將模型卸載至系統 RAM，釋放 VRAM 給 VAE 使用。 |
-| `--vae_offload_device cpu` | 當 VAE 空閒時將模型卸載至系統 RAM，釋放 VRAM 給 DiT 使用。 |
-| `--cache_dit` / `--cache_vae` | 在批次處理不同檔案時，將模型保留於記憶體中避免重複載入。 |
+| `--memory_policy` | 記憶體調度策略：`auto`（預設）、`staged`（階段間 CPU 卸載）、`resident`（模型常駐 GPU）。 |
+| `--quality_profile` | 輸出品質目標：`detail`、`balanced`（預設）、`throughput`。控制動態感知擴散噪聲。 |
+| `--motion_intensity` | 動態感知預算強度（0.0–2.0，預設 1.0）。較高值在高動態批次中保留更多細節。 |
 | `--color_correction` | 色彩校正演算法：`lab`（預設，色彩逼真度最高）、`wavelet`、`wavelet_adaptive`、`none`。 |
 | `--video_backend` | 視訊編碼器後端：`opencv` 或 `ffmpeg`（支援 `--10bit` 高動態範圍）。 |
 | `--debug` | 輸出詳細除錯訊息、時延分析與顯存即時監控數據。 |
@@ -144,26 +143,25 @@ pip install flash-attn --no-build-isolation
 
 於 Google Colab L4 環境實測，基準任務為將 640×360 視訊放大至 **1080p (1920×1080)**。L4 預設使用硬體原生的 SageAttention 2 注意力機制。
 
-| 測試配置 | 模型檔案 | 批次大小 (Batch) | `--keep_on_vram` | 顯存峰值 (Peak) | DiT 推理耗時 | 全流程總耗時 |
+| 測試配置 | 模型檔案 | 批次大小 (Batch) | `--memory_policy` | 顯存峰值 (Peak) | DiT 推理耗時 | 全流程總耗時 |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **3B Q4 卸載基準** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ❌ (CPU 卸載) | 5.01 GB | 7.95 秒 | 62.88 秒 |
-| **3B Q4 顯存常駐** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | ✅ | 6.94 GB | 6.59 秒 | **55.84 秒** |
-| **3B Q4 批次 9** | `seedvr2_ema_3b-Q4_K_M.gguf` | 9 | ✅ | 8.39 GB | 9.05 秒 (1.0秒/幀) | 89.20 秒 |
-| **3B Q4 批次 13** | `seedvr2_ema_3b-Q4_K_M.gguf` | 13 | ✅ | 8.46 GB | 11.48 秒 (**0.88秒/幀**) | 122.86 秒 |
-| **7B Q4 平衡推薦** | `seedvr2_ema_7b-Q4_K_M.gguf` | 5 | ✅ | 9.49 GB | 9.94 秒 | 72.66 秒 |
-| **7B Q4 批次 9** | `seedvr2_ema_7b-Q4_K_M.gguf` | 9 | ✅ | 10.95 GB | 13.61 秒 (1.5秒/幀) | 95.80 秒 |
-| **7B Q8 高畫質** | `seedvr2_ema_7b-Q8_0.gguf` | 5 | ✅ | 13.29 GB | 9.60 秒 | 84.79 秒 |
-| **7B Q8 批次 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | ✅ | 14.75 GB | 13.20 秒 (1.46秒/幀) | 96.11 秒 |
-| **7B FP16 卸載模式** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ❌ (CPU 卸載) | 13.42 GB | 29.37 秒 | 101.83 秒 |
-| **7B FP16 顯存常駐** | `seedvr2_ema_7b_fp16.safetensors` | 5 | ✅ | 20.41 GB | 8.90 秒 | **63.67 秒** |
-
+| **3B Q4 卸載基準** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | `staged` | 5.01 GB | 7.95 秒 | 62.88 秒 |
+| **3B Q4 顯存常駐** | `seedvr2_ema_3b-Q4_K_M.gguf` | 5 | `resident` | 6.94 GB | 6.59 秒 | **55.84 秒** |
+| **3B Q4 批次 9** | `seedvr2_ema_3b-Q4_K_M.gguf` | 9 | `resident` | 8.39 GB | 9.05 秒 (1.0秒/幀) | 89.20 秒 |
+| **3B Q4 批次 13** | `seedvr2_ema_3b-Q4_K_M.gguf` | 13 | `resident` | 8.46 GB | 11.48 秒 (**0.88秒/幀**) | 122.86 秒 |
+| **7B Q4 平衡推薦** | `seedvr2_ema_7b-Q4_K_M.gguf` | 5 | `resident` | 9.49 GB | 9.94 秒 | 72.66 秒 |
+| **7B Q4 批次 9** | `seedvr2_ema_7b-Q4_K_M.gguf` | 9 | `resident` | 10.95 GB | 13.61 秒 (1.5秒/幀) | 95.80 秒 |
+| **7B Q8 高畫質** | `seedvr2_ema_7b-Q8_0.gguf` | 5 | `resident` | 13.29 GB | 9.60 秒 | 84.79 秒 |
+| **7B Q8 批次 9** | `seedvr2_ema_7b-Q8_0.gguf` | 9 | `resident` | 14.75 GB | 13.20 秒 (1.46秒/幀) | 96.11 秒 |
+| **7B FP16 卸載模式** | `seedvr2_ema_7b_fp16.safetensors` | 5 | `staged` | 13.42 GB | 29.37 秒 | 101.83 秒 |
+| **7B FP16 顯存常駐** | `seedvr2_ema_7b_fp16.safetensors` | 5 | `resident` | 20.41 GB | 8.90 秒 | **63.67 秒** |
 #### 大模型專題實測（7B Q8_0 與 7B FP16 在 L4 GPU）
 - **`seedvr2_ema_7b-Q8_0.gguf` (~8.3 GB)**：
-  - **完全可行**！開啟 `--keep_on_vram` 且批次可開至 `--batch_size 9`，顯存峰值僅 14.75 GB，距離 22 GB 顯存上限有超過 7 GB 的安全餘量。畫質與 FP16 無肉眼差異，為大模型最高性價比首選。
+  - **完全可行**！使用 `--memory_policy resident` 且批次可開至 `--batch_size 9`，顯存峰值僅 14.75 GB，距離 22 GB 顯存上限有超過 7 GB 的安全餘量。畫質與 FP16 無肉眼差異，為大模型最高性價比首選。
 - **`seedvr2_ema_7b_fp16.safetensors` (~15.8 GB)**：
   - **在 `--batch_size 5` 下可行**！常駐顯存峰值達 20.41 GB，全流程 63.67 秒。
   - **在 `--batch_size 9` 下不可行**！預檢系統會精準偵測需 ~22.6 GB 顯存並主動安全中止（提供調整建議，不自動盲目 fallback）。
-  - **建議運作參數**：欲常駐運行 7B FP16 請務必保持 `--batch_size 5` 或更小；若需更大批次處理長影片，請關閉 `--keep_on_vram` 或改用 `7b-Q8_0`。
+  - **建議運作參數**：欲常駐運行 7B FP16 請務必保持 `--batch_size 5` 或更小；若需更大批次處理長影片，請改用 `--memory_policy staged` 或改用 `7b-Q8_0`。
 
 ---
 
@@ -174,7 +172,7 @@ pip install flash-attn --no-build-isolation
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q8_0.gguf \
   --resolution 1080 --batch_size 9 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sageattn_2 --memory_policy resident \
   --video_backend ffmpeg --output output_best_quality.mp4
 ```
 
@@ -183,7 +181,7 @@ python inference_cli.py input.mp4 \
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
   --resolution 1080 --batch_size 13 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sageattn_2 --memory_policy resident \
   --video_backend ffmpeg --output output_fastest.mp4
 ```
 
@@ -193,7 +191,7 @@ python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
   --resolution 1080 --batch_size 9 \
   --chunk_size 33 --temporal_overlap 3 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sageattn_2 --memory_policy resident \
   --video_backend ffmpeg --output output_long_video.mp4
 ```
 
@@ -202,7 +200,7 @@ python inference_cli.py input.mp4 \
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b_fp16.safetensors \
   --resolution 1080 --batch_size 5 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sageattn_2 --memory_policy resident \
   --video_backend ffmpeg --output output_short_video.mp4
 ```
 ---

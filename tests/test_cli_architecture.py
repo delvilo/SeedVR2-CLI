@@ -51,13 +51,13 @@ inference_cli.main(['--help'])
 def test_parser_returns_nested_immutable_settings():
     cfg = parse_arguments(['in.mov', '--batch_size', '9', '--chunk_size', '17',
         '--resume',
-        '--vae_decode_tile_size', '512', '--cache_dit', '--cache_ram_gb', '2',
+        '--vae_decode_tile_size', '512', '--memory_policy', 'staged', '--cache_ram_gb', '2',
         '--blocks_to_swap', '8', '--video_backend', 'ffmpeg', '--10bit',
         '--output', 'out.mp4', '--skip_first_frames', '3', '--load_cap', '11'])
     assert cfg.inference.sampling.batch_size == 9
     assert cfg.video.resume is True
     assert cfg.inference.vae.decode.size == 512
-    assert cfg.inference.cache.dit and cfg.inference.cache.ram_gb == 2
+    assert cfg.inference.memory_policy == "staged" and cfg.inference.cache.ram_gb == 2
     assert cfg.inference.swap.blocks_to_swap == 8
     assert cfg.output.path == 'out.mp4' and cfg.output.use_10bit
     assert (cfg.video.chunk_size, cfg.video.skip_first_frames, cfg.video.load_cap) == (17, 3, 11)

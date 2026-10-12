@@ -49,28 +49,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             total_vram_gb = torch.cuda.get_device_properties(torch.device(device)).total_memory / (1024**3)
             gpu_name = torch.cuda.get_device_name(torch.device(device))
 
-            if config.inference.keep_on_vram:
+            from ..optimization.execution_plan import ExecutionPlan, MemoryPolicy
+            is_resident = (config.inference.memory_policy == MemoryPolicy.RESIDENT) or (
+                config.inference.memory_policy == MemoryPolicy.AUTO and not ExecutionPlan.should_stage(
+                    resolution=config.inference.sampling.resolution,
+                    frame_count=33,
+                    batch_size=config.inference.sampling.batch_size,
+                    dit_model=model.dit_model,
+                    device=device,
+                    policy=config.inference.memory_policy,
+                )
+            )
+            if is_resident:
                 est_keep_vram_gb = estimate_keep_on_vram_gb(
                     dit_model=model.dit_model,
                     resolution=config.inference.sampling.resolution,
                     batch_size=config.inference.sampling.batch_size
                 )
-                debug.log(f'VRAM pre-flight check (--keep_on_vram): {free_vram_gb:.2f}GB free, estimated concurrent required ~{est_keep_vram_gb:.1f}GB', category='memory')
+                debug.log(f'VRAM pre-flight check (resident memory): {free_vram_gb:.2f}GB free, estimated concurrent required ~{est_keep_vram_gb:.1f}GB', category='memory')
                 if est_keep_vram_gb > free_vram_gb:
                     rec_model = "seedvr2_ema_7b-Q4_K_M.gguf" if "7b" in model.dit_model.lower() and free_vram_gb >= 12.0 else "seedvr2_ema_3b-Q4_K_M.gguf"
                     rec_batch = max(1, config.inference.sampling.batch_size // 2) if config.inference.sampling.batch_size > 1 else 1
                     rec_res = 720 if config.inference.sampling.resolution > 720 else 360
                     error_msg = (
                         f"\n================================================================================\n"
-                        f"[OOM PRE-FLIGHT ERROR] --keep_on_vram cannot run on {gpu_name} ({device}):\n"
+                        f"[OOM PRE-FLIGHT ERROR] Resident memory policy cannot run on {gpu_name} ({device}):\n"
                         f"  Estimated concurrent VRAM required: ~{est_keep_vram_gb:.1f} GB\n"
                         f"  Available VRAM: {free_vram_gb:.2f} GB (Total: {total_vram_gb:.2f} GB)\n"
                         f"  Model: {model.dit_model} | Resolution: {config.inference.sampling.resolution}p | Batch: {config.inference.sampling.batch_size}\n\n"
                         f"Keeping both DiT and VAE concurrently resident in VRAM with these settings will trigger OOM.\n"
                         f"Auto-fallback is disabled per safety specification. Process is aborted.\n\n"
                         f"Recommended adjustments to run successfully:\n"
-                        f"  1. Disable --keep_on_vram (enables automatic CPU offload between phases):\n"
-                        f"     Remove '--keep_on_vram' from your command\n"
+                        f"  1. Use --memory_policy staged (swaps DiT and VAE between phases):\n"
+                        f"     Add '--memory_policy staged' to your command\n"
                         f"  2. Use a smaller quantized model that fits resident in VRAM:\n"
                         f"     --dit_model {rec_model}\n"
                         f"  3. Reduce batch size:\n"
@@ -92,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"but only {free_vram_gb:.2f}GB is available.\n"
                         f"Solutions:\n"
                         f"  1. Use a more compact quantized model: --dit_model seedvr2_ema_3b-Q4_K_M.gguf\n"
-                        f"  2. Enable BlockSwap offload: --blocks_to_swap 32 --dit_offload_device cpu\n"
+                        f"  2. Enable BlockSwap offload: --blocks_to_swap 32\n"
                         f"  3. Free GPU memory from other processes."
                     )
         if not download_weight(dit_model=model.dit_model, vae_model=DEFAULT_VAE,

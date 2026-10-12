@@ -49,8 +49,6 @@ class VAEConfig:
 
 @dataclass(frozen=True, slots=True)
 class CacheConfig:
-    dit: bool = False
-    vae: bool = False
     ram_gb: float | None = None
     vram_gb: float = 0.0
 
@@ -71,8 +69,9 @@ class InferenceConfig:
     cache: CacheConfig = field(default_factory=CacheConfig)
     swap: BlockSwapConfig = field(default_factory=BlockSwapConfig)
     attention_mode: str = "sageattn_2"
-    keep_on_vram: bool = False
-
+    memory_policy: str = "auto"
+    quality_profile: str = "balanced"
+    motion_intensity: float = 1.0
 
 @dataclass(frozen=True, slots=True)
 class VideoConfig:

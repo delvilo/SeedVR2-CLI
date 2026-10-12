@@ -99,10 +99,11 @@ def reduce_workload(config: InferenceConfig, video: VideoConfig) -> tuple[Infere
     batch = max(1, ((config.sampling.batch_size - 1) // 8) * 4 + 1)
     blocks = 36 if '7b' in config.model.dit_model else 32
     reduced = replace(config,
+        memory_policy="staged",
         sampling=replace(config.sampling, batch_size=batch,
                          temporal_overlap=min(config.sampling.temporal_overlap, batch - 1)),
         vae=replace(config.vae, encode=reduce_tile(config.vae.encode), decode=reduce_tile(config.vae.decode)),
-        offload=OffloadConfig(), cache=replace(config.cache, dit=False, vae=False),
+        offload=OffloadConfig(), cache=config.cache,
         swap=replace(config.swap, blocks_to_swap=min(blocks, max(config.swap.blocks_to_swap + 4, blocks // 2))))
     window = replace(video, chunk_size=max(1, (video.chunk_size or 33) // 2))
     return (reduced, window) if (reduced, window) != (config, video) else None

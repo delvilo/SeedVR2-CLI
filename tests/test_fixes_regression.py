@@ -141,15 +141,10 @@ def test_estimate_keep_on_vram_gb():
     assert vram_7b_fp16 >= 20.0
 
 
-def test_cli_keep_on_vram_flags():
+def test_cli_memory_policy_resident():
     from src.cli.arguments import parse_arguments
-    cfg = parse_arguments(["dummy.mp4", "--keep_on_vram"])
-    assert cfg.inference.keep_on_vram is True
-    assert cfg.inference.offload.dit == "none"
-    assert cfg.inference.offload.vae == "none"
-    assert cfg.inference.offload.tensor == "none"
-    assert cfg.inference.cache.dit is True
-    assert cfg.inference.cache.vae is True
+    cfg = parse_arguments(["dummy.mp4", "--memory_policy", "resident"])
+    assert cfg.inference.memory_policy == "resident"
     assert cfg.inference.swap.blocks_to_swap == 0
 
 def test_resumable_manifest_and_assembly(tmp_path):

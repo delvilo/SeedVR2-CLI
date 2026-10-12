@@ -28,12 +28,22 @@ def plan_file(config: AppConfig, width: int, height: int, device: str,
     reserve = int(sum(weights) * 1.25)
     blocks = 36 if '7b' in inference.model.dit_model else 32
     swap, offload = inference.swap, inference.offload
-    if inference.keep_on_vram:
+    from ..optimization.execution_plan import ExecutionPlan, MemoryPolicy
+    is_resident = (inference.memory_policy == MemoryPolicy.RESIDENT) or (
+        inference.memory_policy == MemoryPolicy.AUTO and not ExecutionPlan.should_stage(
+            resolution=inference.sampling.resolution,
+            frame_count=33,
+            batch_size=inference.sampling.batch_size,
+            dit_model=inference.model.dit_model,
+            policy=inference.memory_policy
+        )
+    )
+    if is_resident:
         swap = replace(swap, blocks_to_swap=0)
         offload = replace(offload, dit='none', vae='none', tensor='none')
         dit_resident = weights[0]
         session.vram_cache_bytes = int(vram * 0.95)
-        cache = replace(cache, dit=True, vae=True, vram_gb=session.vram_cache_bytes / GIB)
+        cache = replace(cache, vram_gb=session.vram_cache_bytes / GIB)
     else:
         if vram and weights[0]:
             needed = math.ceil(blocks * max(0, 1 - .45 * vram / weights[0]))
@@ -43,10 +53,10 @@ def plan_file(config: AppConfig, width: int, height: int, device: str,
         dit_resident = int(weights[0] * max(.1, 1 - swap.blocks_to_swap / blocks))
         cache_ram = int(cache.ram_gb * GIB) if cache.ram_gb is not None else ram // 4
         cache_vram = int(cache.vram_gb * GIB)
-        session.ram_cache_bytes = min(cache_ram, ram // 2) if cache.dit or cache.vae else 0
-        session.vram_cache_bytes = min(cache_vram, vram // 2) if cache.dit or cache.vae else 0
+        session.ram_cache_bytes = min(cache_ram, ram // 2) if is_resident else 0
+        session.vram_cache_bytes = min(cache_vram, vram // 2) if is_resident else 0
         cache = replace(cache, ram_gb=session.ram_cache_bytes / GIB, vram_gb=session.vram_cache_bytes / GIB)
-    session.finish(cache.dit, cache.vae)
+    session.finish(is_resident, is_resident)
     plan = plan_memory(width, height, sampling.resolution, sampling.max_resolution,
                        config.video.chunk_size, sampling.batch_size, sampling.temporal_overlap,
                        ram_bytes=max(0, ram - reserve - session.ram_cache_bytes),

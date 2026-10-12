@@ -529,7 +529,9 @@ def upscale_all_batches(
     progress_callback: Optional[Callable[[int, int, int, str], None]] = None,
     seed: int = 42,
     latent_noise_scale: float = 0.0,
-    cache_model: bool = False
+    cache_model: bool = False,
+    quality_profile: str = "balanced",
+    motion_intensity: float = 1.0,
 ) -> GenerationContext:
     """
     Phase 2: DiT Upscaling for all encoded batches.
@@ -584,7 +586,12 @@ def upscale_all_batches(
     runner.config.diffusion.timesteps.sampling.steps = 1
     runner.configure_diffusion(device=ctx.dit_device, dtype=ctx.compute_dtype)
 
-    # Count valid latents
+    # Initialize Motion-Aware Dynamic Budget
+    from ..optimization.motion_budget import compute_batch_motion_profile, MotionBudgetController
+    motion_scores = compute_batch_motion_profile(ctx.input_images, ctx.batch_metadata)
+    motion_ctrl = MotionBudgetController(motion_scores, quality_profile=quality_profile, intensity=motion_intensity)
+    debug.log(motion_ctrl.summary(), category="generation", force=True)
+
     num_valid_latents = len([l for l in ctx.all_latents if l is not None])
 
     # Safety check for empty latents
@@ -647,20 +654,19 @@ def upscale_all_batches(
             noises = [base_noise]
             aug_noises = [base_noise * 0.1 + torch.randn_like(base_noise) * 0.05]
             
-            # Log latent noise application if enabled
-            if latent_noise_scale > 0:
-                debug.log(f"Applying latent noise (scale: {latent_noise_scale:.3f})", category="generation")
+            batch_noise_scale = motion_ctrl.values_for_batch(batch_idx, latent_noise_scale)
+            if batch_noise_scale > 0:
+                debug.log(f"Applying adaptive latent noise (scale: {batch_noise_scale:.3f})", category="generation")
             
             def _add_noise(x, aug_noise):
-                if latent_noise_scale == 0.0:
+                if batch_noise_scale == 0.0:
                     return x
-                t = torch.tensor([1000.0], device=ctx.dit_device, dtype=ctx.compute_dtype) * latent_noise_scale
+                t = torch.tensor([1000.0], device=ctx.dit_device, dtype=ctx.compute_dtype) * batch_noise_scale
                 shape = torch.tensor(x.shape[1:], device=ctx.dit_device)[None]
                 t = runner.timestep_transform(t, shape)
                 x = runner.schedule.forward(x, aug_noise, t)
                 del t, shape
                 return x
-            
             # Generate condition
             condition = runner.get_condition(
                 noises[0],

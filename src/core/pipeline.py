@@ -40,15 +40,20 @@ def iter_processed_batches(
     debug: Debug, session: InferenceSession, memory_report: str | None = None,
 ) -> Generator[torch.Tensor, None, None]:
     inference_device = device
-    keep_on_vram = config.keep_on_vram
-    cache_dit = config.cache.dit or keep_on_vram
-    cache_vae = config.cache.vae or keep_on_vram
-    dit_offload = parse_offload_device(config.offload.dit, cache_dit, keep_on_vram)
-    vae_offload = parse_offload_device(config.offload.vae, cache_vae, keep_on_vram)
-    tensor_offload = parse_offload_device(config.offload.tensor, False, keep_on_vram)
+    from ..optimization.execution_plan import ExecutionPlan
+    dit_offload, vae_offload, tensor_offload, is_resident = ExecutionPlan.resolve_offload_configuration(
+        resolution=config.sampling.resolution,
+        frame_count=frames_tensor.shape[0] if frames_tensor.dim() >= 4 else 1,
+        batch_size=config.sampling.batch_size,
+        dit_model=config.model.dit_model,
+        device=inference_device,
+        policy=config.memory_policy,
+    )
+    cache_dit = is_resident
+    cache_vae = is_resident
     ctx = setup_generation_context(dit_device=inference_device, vae_device=inference_device,
         dit_offload_device=dit_offload, vae_offload_device=vae_offload,
-        tensor_offload_device=tensor_offload, debug=debug, keep_on_vram=keep_on_vram)
+        tensor_offload_device=tensor_offload, debug=debug, keep_on_vram=is_resident)
     recorder = MemoryRecorder(memory_report, inference_device)
     # Prepare runner with caching support
     model_dir = config.model.model_dir if config.model.model_dir is not None else get_base_cache_dir()
@@ -78,7 +83,7 @@ def iter_processed_batches(
                 attention_mode=config.attention_mode,
 
             )
-            runner._keep_on_vram = keep_on_vram
+            runner._keep_on_vram = is_resident
 
             # Preload text embeddings before Phase 1 to avoid sync stall in Phase 2
             ctx.text_embeds = load_text_embeddings(script_directory, ctx.dit_device, ctx.compute_dtype, debug)
@@ -121,7 +126,9 @@ def iter_processed_batches(
                 runner, ctx=ctx, debug=debug, progress_callback=None,
                 seed=config.sampling.seed,
                 latent_noise_scale=config.sampling.latent_noise_scale,
-                cache_model=cache_dit
+                cache_model=cache_dit,
+                quality_profile=config.quality_profile,
+                motion_intensity=config.motion_intensity,
             )
 
         # CPU postprocessing avoids co-residency with the active VAE on CUDA.

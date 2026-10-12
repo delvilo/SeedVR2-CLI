@@ -30,14 +30,13 @@ Examples:
   Streaming mode for long videos with 10-bit video output (requires FFMPEG):
     python {invocation} long_video.mp4 --resolution 1080 --batch_size 33 --chunk_size 330 --temporal_overlap 3 --video_backend ffmpeg --10bit
 
-  Memory-optimized for low VRAM (8GB):
-    python {invocation} image.png --dit_model seedvr2_ema_3b-Q8_0.gguf --blocks_to_swap 32 --swap_io_components --dit_offload_device cpu --vae_offload_device cpu
-
+  Memory-optimized for low VRAM (8GB / Colab T4):
+    python {invocation} image.png --dit_model seedvr2_ema_3b-Q8_0.gguf --blocks_to_swap 32 --swap_io_components --memory_policy staged
   High resolution with VAE tiling:
     python {invocation} video.mp4 --resolution 1440 --batch_size 33 --uniform_batch_size --temporal_overlap 3 --vae_encode_tiled --vae_decode_tiled
 
   Batch directory processing:
-    python {invocation} media_folder/ --output processed/ --cache_dit --cache_vae --dit_offload_device cpu --vae_offload_device cpu --resolution 1080 --max_resolution 1920
+    python {invocation} media_folder/ --output processed/ --memory_policy auto --resolution 1080 --max_resolution 1920
 """
 
     parser = argparse.ArgumentParser(
@@ -57,7 +56,6 @@ Examples:
     _add_blockswap_group(parser)
     _add_vae_group(parser)
     _add_perf_group(parser)
-    _add_cache_group(parser)
     _add_debug_group(parser)
 
     return parser
@@ -135,18 +133,13 @@ def _add_device_group(parser: argparse.ArgumentParser) -> None:
     device_group = parser.add_argument_group('Device management')
     device_group.add_argument("--cuda_device", type=int, default=None,
                     help="One visible CUDA device index; default: device 0")
-    device_group.add_argument("--dit_offload_device", type=str, default="cpu",
-                        help="DiT offload device when idle: 'none' (keep on selected GPU) or 'cpu' (offload to RAM). "
-                             "Frees VRAM between phases. Required for BlockSwap. Default: cpu")
-    device_group.add_argument("--vae_offload_device", type=str, default="cpu",
-                        help="VAE offload device when idle: 'none' or 'cpu'. Frees VRAM between phases. Default: cpu")
     device_group.add_argument("--tensor_offload_device", type=str, default="cpu",
                         help="Intermediate tensor storage: 'cpu' (recommended) or 'none' (keep on selected GPU). Default: cpu")
-    device_group.add_argument("--keep_on_vram", action="store_true",
-                        help="Keep both DiT and VAE resident on GPU VRAM across all phases (no CPU offloading). "
-                             "Delivers up to 2x speedup on GPUs with sufficient VRAM (e.g. L4/A100). "
-                             "Pre-flight check will abort with recommendations if VRAM is insufficient.")
-
+    device_group.add_argument("--memory_policy", type=str, default="auto",
+                        choices=["auto", "staged", "resident"],
+                        help="Memory management policy: 'auto' (automatically chooses staged on T4/16GB or resident on 24GB+), "
+                             "'staged' (swaps DiT and VAE between phases to eliminate OOM on <=16GB GPUs), "
+                             "or 'resident' (keeps both models in VRAM for maximum speed). Default: auto")
 
 def _add_memory_group(parser: argparse.ArgumentParser) -> None:
     memory_group = parser.add_argument_group('Memory budgets (GiB; planning estimates, not hard limits)')
@@ -190,15 +183,11 @@ def _add_perf_group(parser: argparse.ArgumentParser) -> None:
     perf_group.add_argument("--attention_mode", type=str, default="sageattn_2",
                         choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
                         help="Attention backend: 'sageattn_2' (default, fast INT8/FP16), 'flash_attn_2' (Ampere/Ada/Hopper/L4), 'flash_attn_3', 'sageattn_3', or 'sdpa'")
-
-def _add_cache_group(parser: argparse.ArgumentParser) -> None:
-    cache_group = parser.add_argument_group('Model caching (batch processing)')
-    cache_group.add_argument("--cache_dit", action="store_true",
-                        help="Keep DiT model in memory between files. Subject to cache memory caps; idle models default to CPU")
-    cache_group.add_argument("--cache_vae", action="store_true",
-                        help="Keep VAE model in memory between files. Subject to cache memory caps; idle models default to CPU")
-
-
+    perf_group.add_argument("--quality_profile", type=str, default="balanced",
+                        choices=["detail", "balanced", "throughput"],
+                        help="Motion-aware dynamic budget profile: 'detail' (max fidelity), 'balanced' (default), or 'throughput' (fastest)")
+    perf_group.add_argument("--motion_intensity", type=float, default=1.0,
+                        help="Motion sensitivity multiplier for dynamic budget (default: 1.0)")
 def _add_debug_group(parser: argparse.ArgumentParser) -> None:
     debug_group = parser.add_argument_group('Debugging')
     debug_group.add_argument("--debug", action="store_true",
@@ -267,9 +256,9 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
                 latent_noise_scale=a.latent_noise_scale,
             ),
             offload=OffloadConfig(
-                dit="none" if a.keep_on_vram else a.dit_offload_device,
-                vae="none" if a.keep_on_vram else a.vae_offload_device,
-                tensor="none" if a.keep_on_vram else a.tensor_offload_device,
+                dit="none" if a.memory_policy == "resident" else "cpu",
+                vae="none" if a.memory_policy == "resident" else "cpu",
+                tensor=a.tensor_offload_device,
             ),
             vae=VAEConfig(
                 encode=TileConfig(
@@ -286,17 +275,17 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
             ),
 
             cache=CacheConfig(
-                dit=True if a.keep_on_vram else a.cache_dit,
-                vae=True if a.keep_on_vram else a.cache_vae,
                 ram_gb=a.cache_ram_gb,
                 vram_gb=a.cache_vram_gb,
             ),
             swap=BlockSwapConfig(
-                blocks_to_swap=0 if a.keep_on_vram else a.blocks_to_swap,
-                swap_io_components=False if a.keep_on_vram else a.swap_io_components,
+                blocks_to_swap=0 if a.memory_policy == "resident" else a.blocks_to_swap,
+                swap_io_components=False if a.memory_policy == "resident" else a.swap_io_components,
             ),
             attention_mode=a.attention_mode,
-            keep_on_vram=a.keep_on_vram,
+            memory_policy=a.memory_policy,
+            quality_profile=a.quality_profile,
+            motion_intensity=a.motion_intensity,
         ),
         video=VideoConfig(
             chunk_size=a.chunk_size,

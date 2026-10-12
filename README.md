@@ -45,11 +45,11 @@ python inference_cli.py /content/drive/MyDrive/SeedVR2/input/video.mp4 \
   --model_dir /content/drive/MyDrive/SeedVR2/models \
   --output /content/drive/MyDrive/SeedVR2/output/video.mp4
 
-# Directory processing can reuse loaded models between files.
+# Directory processing: reuse loaded models between files with staged memory policy.
 python inference_cli.py /content/drive/MyDrive/SeedVR2/input \
   --output /content/drive/MyDrive/SeedVR2/output \
   --model_dir /content/drive/MyDrive/SeedVR2/models \
-  --cache_dit --cache_vae --dit_offload_device cpu --vae_offload_device cpu
+  --memory_policy staged
 
 ~~~
 
@@ -64,8 +64,10 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --batch_size | Frames per model batch; use 1, 5, 9, 13, 17, and so on (4n+1). |
 | --chunk_size | Maximum input window; 0 automatically chooses a finite window of at most 33 frames. |
 | --vae_encode_tiled / --vae_decode_tiled | Tiling is enabled by default; use --no-vae_encode_tiled / --no-vae_decode_tiled to opt out initially. |
-| --blocks_to_swap / --dit_offload_device cpu | Offload DiT blocks to system RAM when VRAM is limited. |
-| --cache_dit / --cache_vae | Request model reuse within the RAM/VRAM cache caps. |
+| --blocks_to_swap | Offload DiT blocks to system RAM when VRAM is limited. |
+| --memory_policy | Memory scheduling: `auto` (default), `staged` (CPU offload between phases), `resident` (all models stay on GPU). |
+| --quality_profile | Output quality target: `detail`, `balanced` (default), `throughput`. Controls motion-adaptive diffusion noise. |
+| --motion_intensity | Motion-aware budget intensity (0.0–2.0, default 1.0). Higher values preserve more detail in high-motion batches. |
 | --ram_budget_gb / --vram_budget_gb | Set memory planning allowances (GiB); 0 uses available-memory defaults. |
 | --cache_ram_gb / --cache_vram_gb | Limit retained model storage; 0 disables that cache tier. |
 | --memory_report / --oom_retries | Record phase peaks to JSONL; retry caught OOMs with smaller workloads. |
