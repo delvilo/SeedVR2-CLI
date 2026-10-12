@@ -22,13 +22,12 @@ The output buffer bound applies to the CLI's supported execution mode: one GPU s
 
 The input window is finite by default: `--chunk_size 0` now means automatic planning, with at most 33 new input frames per window. A positive value is a ceiling that the planner may reduce. Input context and optional prepended frames are included in the estimate.
 
-VAE tiling and CPU model offload are enabled by default. `--no-vae_encode_tiled` and `--no-vae_decode_tiled` opt out of tiling for the initial attempt. Color and alpha postprocessing run on CPU to avoid competing with the active VAE for VRAM. This can reduce throughput; it should be benchmarked on the target Colab GPU/CPU combination.
+VAE tiling and memory scheduling are handled automatically by the planner.
 
 | Option | Meaning |
 | --- | --- |
 | `--memory_policy` | Memory scheduling: `auto` (default), `staged` (CPU offload between phases), or `resident` (models stay on GPU). |
 | `--memory_report path.jsonl` | Append setup, read, encode, upscale and combined decode/postprocess/write measurements, plans, attempts, retries and completion events. |
-| `--oom_retries` | Maximum retries after the initial attempt, default 3. Set 0 to fail immediately. |
 | `--resume` | Resume long video processing across sessions. Persists chunk checkpoints and manifest; losslessly stitches chunks into the final MP4 with FFmpeg concat. |
 
 Budgets are **admission estimates and model-retention caps**, not allocator-enforced process limits. The planner reserves checkpoint/cache headroom and estimates pixel, latent, overlap and postprocess workspaces. Quantization, compiled graphs, CUDA kernels and codecs can use additional memory. Cache accounting measures parameter/buffer storage, not compiler caches. Cache caps are enforced between invocations; active inference can exceed them. CPU model offload trades VRAM for RAM. Explicit CUDA tensor offload can raise VRAM use beyond the default CPU-storage estimate.

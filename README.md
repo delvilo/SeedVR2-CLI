@@ -63,12 +63,11 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --resolution | Target short edge in pixels. |
 | --batch_size | Frames per model batch; use 1, 5, 9, 13, 17, and so on (4n+1). |
 | --chunk_size | Maximum input window; 0 automatically chooses a finite window of at most 33 frames. |
-| --vae_encode_tiled / --vae_decode_tiled | Tiling is enabled by default; use --no-vae_encode_tiled / --no-vae_decode_tiled to opt out initially. |
 | --blocks_to_swap | Offload DiT blocks to system RAM when VRAM is limited. |
 | --memory_policy | Memory scheduling: `auto` (default), `staged` (CPU offload between phases), `resident` (all models stay on GPU). |
 | --quality_profile | Output quality target: `detail`, `balanced` (default), `throughput`. Controls motion-adaptive diffusion noise. |
 | --motion_intensity | Motion-aware budget intensity (0.0–2.0, default 1.0). Higher values preserve more detail in high-motion batches. |
-| --memory_report / --oom_retries | Record phase peaks to JSONL; retry caught OOMs with smaller workloads. |
+| --memory_report | Append phase RSS/CUDA peaks and retry events to JSONL. |
 | --attention_mode | PyTorch SDPA is the default. Optional Flash/Sage backends require separate compatible installations. |
 | --resume | Resume an interrupted long video upscale from existing chunk checkpoints. |
 | --video_backend ffmpeg / --10bit | Encode MP4 using FFmpeg, optionally with 10-bit x265 output. |

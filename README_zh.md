@@ -96,7 +96,6 @@ python inference_cli.py media_folder/ \
 | `--resolution` | 設定放大後的短邊目標解析度（像素，例如 720、1080、1440）。 |
 | `--batch_size` | 每次模型推理的訊框批次大小（必須符合 4n+1，如 1, 5, 9, 13, 17, 33）。數值越大時序連續性越好。 |
 | `--chunk_size` | 單次加載的輸入最大訊框數（0 為自動記憶體規劃，最多 33 幀）。 |
-| `--vae_encode_tiled` / `--vae_decode_tiled` | 啟用 VAE 分塊處理，大幅降低高解析度放大時的顯存消耗（預設啟用）。 |
 | `--blocks_to_swap` | BlockSwap 卸載至系統 RAM 的變壓器層數量（3B 最多 32 層，7B 最多 36 層）。 |
 | `--memory_policy` | 記憶體調度策略：`auto`（預設）、`staged`（階段間 CPU 卸載）、`resident`（模型常駐 GPU）。 |
 | `--quality_profile` | 輸出品質目標：`detail`、`balanced`（預設）、`throughput`。控制動態感知擴散噪聲。 |

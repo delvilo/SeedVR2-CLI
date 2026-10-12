@@ -32,8 +32,8 @@ Examples:
 
   Memory-optimized for low VRAM (8GB / Colab T4):
     python {invocation} image.png --dit_model seedvr2_ema_3b-Q8_0.gguf --blocks_to_swap 32 --swap_io_components --memory_policy staged
-  High resolution with VAE tiling:
-    python {invocation} video.mp4 --resolution 1440 --batch_size 33 --uniform_batch_size --temporal_overlap 3 --vae_encode_tiled --vae_decode_tiled
+  High resolution upscaling (automatic VAE tiling):
+    python {invocation} video.mp4 --resolution 1440 --batch_size 33 --uniform_batch_size --temporal_overlap 3
 
   Batch directory processing:
     python {invocation} media_folder/ --output processed/ --memory_policy auto --resolution 1080 --max_resolution 1920
@@ -144,7 +144,6 @@ def _add_device_group(parser: argparse.ArgumentParser) -> None:
 def _add_memory_group(parser: argparse.ArgumentParser) -> None:
     memory_group = parser.add_argument_group('Memory diagnostics & recovery')
     memory_group.add_argument('--memory_report', type=str, default=None, help='Append phase RSS/CUDA peaks and retry events to JSONL')
-    memory_group.add_argument('--oom_retries', type=int, default=3, help='File restarts with smaller chunk/batch/tile sizes after OOM; 0 disables retries')
 
 def _add_blockswap_group(parser: argparse.ArgumentParser) -> None:
     blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
@@ -156,22 +155,9 @@ def _add_blockswap_group(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_vae_group(parser: argparse.ArgumentParser) -> None:
-    vae_group = parser.add_argument_group('VAE tiling (for high resolution upscale)')
-    vae_group.add_argument("--vae_encode_tiled", action=argparse.BooleanOptionalAction, default=True,
-                        help="Enable VAE encode tiling to reduce VRAM during encoding (default: enabled)")
-    vae_group.add_argument("--vae_encode_tile_size", type=int, default=1024,
-                        help="VAE encode tile size in pixels (default: 1024). Applied to both height and width. Only used if --vae_encode_tiled is set")
-    vae_group.add_argument("--vae_encode_tile_overlap", type=int, default=128,
-                        help="VAE encode tile overlap in pixels (default: 128). Reduces visible seams between tiles. Only used if --vae_encode_tiled is set")
-    vae_group.add_argument("--vae_decode_tiled", action=argparse.BooleanOptionalAction, default=True,
-                        help="Enable VAE decode tiling to reduce VRAM during decoding (default: enabled)")
-    vae_group.add_argument("--vae_decode_tile_size", type=int, default=1024,
-                        help="VAE decode tile size in pixels (default: 1024). Applied to both height and width. Only used if --vae_decode_tiled is set")
-    vae_group.add_argument("--vae_decode_tile_overlap", type=int, default=128,
-                        help="VAE decode tile overlap in pixels (default: 128). Reduces visible seams between tiles. Only used if --vae_decode_tiled is set")
+    vae_group = parser.add_argument_group('VAE diagnostics')
     vae_group.add_argument("--tile_debug", type=str, default="false", choices=["false", "encode", "decode"],
                         help="Visualize tiles: 'false' (default), 'encode', or 'decode'")
-
 
 def _add_perf_group(parser: argparse.ArgumentParser) -> None:
     perf_group = parser.add_argument_group('Performance optimization')
@@ -191,7 +177,7 @@ def _add_debug_group(parser: argparse.ArgumentParser) -> None:
 
 def _validate_parsed_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Validate parsed command-line arguments, raising parser errors if invalid."""
-    for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap', 'oom_retries'):
+    for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap'):
         value = getattr(args, name)
         if value is not None and (not math.isfinite(value) or value < 0):
             parser.error(f'--{name} must be finite and nonnegative')
@@ -199,10 +185,6 @@ def _validate_parsed_arguments(parser: argparse.ArgumentParser, args: argparse.N
         parser.error('--batch_size must be 4n+1 (1, 5, 9, ...)')
     if args.resolution < 1 or args.max_resolution < 0:
         parser.error('Resolution must be positive and max_resolution nonnegative')
-    for phase in ('encode', 'decode'):
-        size, overlap = getattr(args, f'vae_{phase}_tile_size'), getattr(args, f'vae_{phase}_tile_overlap')
-        if size < 128 or size % 64 or overlap < 0 or overlap >= size:
-            parser.error(f'VAE {phase} tile size must be a multiple of 64 >= 128; overlap must be in [0, size)')
     if args.use_10bit and args.video_backend != 'ffmpeg':
         parser.error('--10bit requires --video_backend ffmpeg')
     if args.cuda_device is not None and args.cuda_device < 0:
@@ -255,16 +237,6 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
                 tensor=a.tensor_offload_device,
             ),
             vae=VAEConfig(
-                encode=TileConfig(
-                    enabled=a.vae_encode_tiled,
-                    size=a.vae_encode_tile_size,
-                    overlap=a.vae_encode_tile_overlap,
-                ),
-                decode=TileConfig(
-                    enabled=a.vae_decode_tiled,
-                    size=a.vae_decode_tile_size,
-                    overlap=a.vae_decode_tile_overlap,
-                ),
                 debug=a.tile_debug,
             ),
 
@@ -285,7 +257,6 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
             resume=a.resume,
         ),
         memory=MemoryConfig(
-            oom_retries=a.oom_retries,
             report=a.memory_report,
         ),
         output=OutputConfig(
