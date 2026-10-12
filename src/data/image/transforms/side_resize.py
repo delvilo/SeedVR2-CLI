@@ -15,8 +15,7 @@
 from typing import Union
 import torch
 from PIL import Image
-from torchvision.transforms import InterpolationMode
-from torchvision.transforms import functional as TVF
+from .functional import resize, InterpolationMode
 
 class SideResize:
     def __init__(
@@ -54,7 +53,7 @@ class SideResize:
         else:
             size = self.size
 
-        resized = TVF.resize(image, size, self.interpolation, antialias=True)
+        resized = resize(image, size, self.interpolation, antialias=True)
         
         # Apply max_size constraint if specified
         if self.max_size > 0:
@@ -66,6 +65,6 @@ class SideResize:
             if max(h, w) > self.max_size:
                 scale = self.max_size / max(h, w)
                 new_h, new_w = round(h * scale), round(w * scale)
-                resized = TVF.resize(resized, (new_h, new_w), self.interpolation, antialias=True)
+                resized = resize(resized, (new_h, new_w), self.interpolation, antialias=True)
         
         return resized

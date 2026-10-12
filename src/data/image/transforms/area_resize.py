@@ -17,8 +17,7 @@ import random
 from typing import Union
 import torch
 from PIL import Image
-from torchvision.transforms import functional as TVF
-from torchvision.transforms.functional import InterpolationMode
+from .functional import resize, crop, InterpolationMode
 
 
 class AreaResize:
@@ -48,7 +47,7 @@ class AreaResize:
 
         resized_height, resized_width = round(height * scale), round(width * scale)
 
-        return TVF.resize(
+        return resize(
             image,
             size=(resized_height, resized_width),
             interpolation=self.interpolation,
@@ -100,7 +99,7 @@ class AreaRandomCrop:
 
         resized_height, resized_width = round(resized_height), round(resized_width)
         i, j, h, w = self.get_params((height, width), (resized_height, resized_width))
-        image = TVF.crop(image, i, j, h, w)
+        image = crop(image, i, j, h, w)
         return image
 
 class ScaleResize:
@@ -127,7 +126,7 @@ class ScaleResize:
         # keep original height and width for small pictures
 
         resized_height, resized_width = round(height * scale), round(width * scale)
-        image = TVF.resize(
+        image = resize(
             image,
             size=(resized_height, resized_width),
             interpolation=interpolation_mode,

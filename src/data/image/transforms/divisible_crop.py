@@ -15,7 +15,7 @@
 from typing import Union
 import torch
 from PIL import Image
-from torchvision.transforms import functional as TVF
+from .functional import center_crop
 
 
 class DivisibleCrop:
@@ -36,7 +36,7 @@ class DivisibleCrop:
         cropped_height = height - (height % self.height_factor)
         cropped_width = width - (width % self.width_factor)
 
-        image = TVF.center_crop(img=image, output_size=(cropped_height, cropped_width))
+        image = center_crop(img=image, output_size=(cropped_height, cropped_width))
         return image
 
 

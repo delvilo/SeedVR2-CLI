@@ -17,8 +17,22 @@ import torch
 from PIL import Image
 from torch import Tensor
 from torch.nn import functional as F
+import numpy as np
 from typing import Optional
-from torchvision.transforms import ToTensor, ToPILImage
+
+
+def _pil_to_tensor(img: Image.Image) -> Tensor:
+    arr = np.array(img)
+    if arr.ndim == 2:
+        arr = arr[..., None]
+    return torch.from_numpy(arr).permute(2, 0, 1).float().div_(255.0)
+
+
+def _tensor_to_pil(tensor: Tensor) -> Image.Image:
+    arr = tensor.detach().cpu().mul(255).clamp(0, 255).byte().permute(1, 2, 0).numpy()
+    if arr.shape[-1] == 1:
+        arr = arr.squeeze(-1)
+    return Image.fromarray(arr)
 from ..common.half_precision_fixes import safe_pad_operation, safe_interpolate_operation, ensure_float32_precision
 
 
@@ -33,16 +47,10 @@ def adain_color_fix(target: Image.Image, source: Image.Image) -> Image.Image:
     Returns:
         PIL Image with corrected colors
     """
-    to_tensor = ToTensor()
-    target_tensor = to_tensor(target).unsqueeze(0)
-    source_tensor = to_tensor(source).unsqueeze(0)
-    
+    target_tensor = _pil_to_tensor(target).unsqueeze(0)
+    source_tensor = _pil_to_tensor(source).unsqueeze(0)
     result_tensor = adaptive_instance_normalization(target_tensor, source_tensor)
-    
-    to_image = ToPILImage()
-    result_image = to_image(result_tensor.squeeze(0).clamp_(0.0, 1.0))
-    
-    return result_image
+    return _tensor_to_pil(result_tensor.squeeze(0).clamp_(0.0, 1.0))
 
 
 def wavelet_color_fix(target: Image.Image, source: Image.Image, debug: Optional['Debug'] = None) -> Image.Image:
@@ -57,16 +65,10 @@ def wavelet_color_fix(target: Image.Image, source: Image.Image, debug: Optional[
     Returns:
         PIL Image with corrected colors
     """
-    to_tensor = ToTensor()
-    target_tensor = to_tensor(target).unsqueeze(0)
-    source_tensor = to_tensor(source).unsqueeze(0)
-    
+    target_tensor = _pil_to_tensor(target).unsqueeze(0)
+    source_tensor = _pil_to_tensor(source).unsqueeze(0)
     result_tensor = wavelet_reconstruction(target_tensor, source_tensor, debug)
-    
-    to_image = ToPILImage()
-    result_image = to_image(result_tensor.squeeze(0).clamp_(0.0, 1.0))
-    
-    return result_image
+    return _tensor_to_pil(result_tensor.squeeze(0).clamp_(0.0, 1.0))
 
 
 def calc_mean_std(feat: Tensor, eps: float = 1e-5) -> tuple[Tensor, Tensor]:

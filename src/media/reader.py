@@ -7,9 +7,13 @@ from typing import Literal, Tuple, List
 import cv2
 import numpy as np
 import torch
-
 from ..utils.debug import Debug
 
+try:
+    from torchcodec.decoders import VideoDecoder
+    TORCHCODEC_AVAILABLE = True
+except (ImportError, OSError):
+    TORCHCODEC_AVAILABLE = False
 VIDEO_EXTENSIONS = {'.mkv', '.avi', '.mp4', '.flv', '.mov', '.wmv', '.m4v', '.webm'}
 IMAGE_EXTENSIONS = {'.jpg', '.tiff', '.tif', '.png', '.webp', '.bmp', '.jpeg'}
 
@@ -125,8 +129,29 @@ def read_frames(cap, count):
 
 
 class VideoReader:
-    """Own one capture, exposing only its requested frame range."""
+    """Own one video capture or TorchCodec decoder, exposing requested frame ranges."""
     def __init__(self, path: str, skip: int = 0, limit: int = 0):
+        self.path = path
+        self.skip = skip
+        self.decoder = None
+        self.cap = None
+
+        if TORCHCODEC_AVAILABLE:
+            try:
+                self.decoder = VideoDecoder(path)
+                meta = self.decoder.metadata
+                self.width = int(meta.width)
+                self.height = int(meta.height)
+                self.fps = float(meta.average_fps_from_header or 30.0)
+                total = int(meta.num_frames_from_header or len(self.decoder))
+                self.count = max(0, total - skip)
+                if limit:
+                    self.count = min(self.count, limit)
+                self.current_idx = skip
+                return
+            except Exception:
+                self.decoder = None
+
         self.cap = cv2.VideoCapture(path)
         try:
             if not self.cap.isOpened():
@@ -143,14 +168,22 @@ class VideoReader:
             raise
 
     def read(self, count: int) -> torch.Tensor | None:
+        if self.decoder is not None:
+            end_idx = min(self.current_idx + count, self.skip + self.count)
+            if self.current_idx >= end_idx:
+                return None
+            frames = self.decoder.get_frames_in_range(self.current_idx, end_idx).data
+            self.current_idx = end_idx
+            return frames.permute(0, 2, 3, 1).contiguous()
         return read_frames(self.cap, count)
 
     def __enter__(self) -> 'VideoReader':
         return self
 
     def __exit__(self, *_):
-        self.cap.release()
-
+        if self.cap is not None:
+            self.cap.release()
+        self.decoder = None
 
 def probe_dimensions(path: str, kind: str, debug: Debug) -> tuple[int, int]:
     if kind == 'video':

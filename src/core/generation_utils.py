@@ -33,7 +33,7 @@ from ..config import BlockSwapConfig, CompileConfig
 import os
 import torch
 from typing import Dict, List, Optional, Tuple, Any, Callable, Union
-from torchvision.transforms import Compose, Lambda, Normalize
+from ..data.image.transforms.functional import Compose, Lambda, Normalize
 
 from .model_configuration import configure_runner
 from .infer import VideoDiffusionInfer
