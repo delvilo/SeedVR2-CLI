@@ -416,7 +416,7 @@ def prepare_runner(
     decode_tile_size: Optional[Tuple[int, int]] = None,
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
-    attention_mode: str = 'sdpa',
+    attention_mode: str = 'sparse_sage_attention',
 
 ) -> 'VideoDiffusionInfer':
     """

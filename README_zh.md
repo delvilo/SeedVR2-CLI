@@ -110,7 +110,7 @@ python inference_cli.py media_folder/ \
 ### 注意力機制與預編譯 FlashAttention-2 安裝指令
 
 SeedVR2-cli 支援多種注意力後端（`--attention_mode`）：
-- **`sageattn_2`**（預設）：速度極快，透過 `pip install sageattention` 即可秒裝。SM 8.0+（L4 / A100）原生全速支援，T4 (SM 7.5) 會自動平滑回退至 SDPA。
+- **`sparse_sage_attention`**（預設）：速度極快，採用純 Python/Triton INT8 核心，內建免編譯。SM 8.0+（L4 / A100）原生全速支援，T4 (SM 7.5) 會自動平滑回退至 SDPA。
 - **`sdpa`**：PyTorch 原生縮放點積注意力（內建，免安裝任何外部套件）。
 - **`flash_attn_2`**：針對 Ampere、Ada、Hopper 架構（SM 8.0+）的高效 CUDA 注意力。**切勿從源碼編譯**（編譯需 25 分鐘以上）。請直接安裝對應環境的官方或社群預編譯 Wheel 輪子：
 
@@ -172,7 +172,7 @@ pip install flash-attn --no-build-isolation
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q8_0.gguf \
   --resolution 1080 --batch_size 9 \
-  --attention_mode sageattn_2 --memory_policy resident \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_best_quality.mp4
 ```
 
@@ -181,7 +181,7 @@ python inference_cli.py input.mp4 \
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
   --resolution 1080 --batch_size 13 \
-  --attention_mode sageattn_2 --memory_policy resident \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_fastest.mp4
 ```
 
@@ -191,7 +191,7 @@ python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
   --resolution 1080 --batch_size 9 \
   --chunk_size 33 --temporal_overlap 3 \
-  --attention_mode sageattn_2 --memory_policy resident \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_long_video.mp4
 ```
 
@@ -200,7 +200,7 @@ python inference_cli.py input.mp4 \
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b_fp16.safetensors \
   --resolution 1080 --batch_size 5 \
-  --attention_mode sageattn_2 --memory_policy resident \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_short_video.mp4
 ```
 ---

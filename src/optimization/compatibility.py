@@ -36,33 +36,15 @@ except (ImportError, AttributeError, OSError):
 
 FLASH_ATTN_AVAILABLE = FLASH_ATTN_2_AVAILABLE or FLASH_ATTN_3_AVAILABLE
 
-# 3. SageAttention 2 (varlen support)
-sageattn_varlen = None
-SAGE_ATTN_2_AVAILABLE = False
+# 3. Sparse SageAttention (in-tree Triton INT8 kernel, zero compilation needed)
+sparse_sageattn = None
+SPARSE_SAGE_AVAILABLE = False
 try:
-    from sageattention import sageattn_varlen as _sa2_varlen
-    sageattn_varlen = _sa2_varlen
-    SAGE_ATTN_2_AVAILABLE = True
+    from .sparse_sage.core import sparse_sageattn as _sparse_sageattn
+    sparse_sageattn = _sparse_sageattn
+    SPARSE_SAGE_AVAILABLE = True
 except (ImportError, AttributeError, OSError):
     pass
-
-# 4. SageAttention 3 / Blackwell (RTX 50xx only, batched attention)
-sageattn_blackwell = None
-SAGE_ATTN_3_AVAILABLE = False
-try:
-    from sageattn3 import sageattn3_blackwell as _sa3_blackwell
-    sageattn_blackwell = _sa3_blackwell
-    SAGE_ATTN_3_AVAILABLE = True
-except (ImportError, AttributeError, OSError):
-    try:
-        from sageattention import sageattn_blackwell as _sa3_blackwell
-        sageattn_blackwell = _sa3_blackwell
-        SAGE_ATTN_3_AVAILABLE = True
-    except (ImportError, AttributeError, OSError):
-        pass
-
-SAGE_ATTN_AVAILABLE = SAGE_ATTN_2_AVAILABLE or SAGE_ATTN_3_AVAILABLE
-
 
 def validate_attention_mode(requested_mode: str, debug=None) -> str:
     """
@@ -123,63 +105,25 @@ def validate_attention_mode(requested_mode: str, debug=None) -> str:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
         return 'sdpa'
     
-    # SageAttention 3 (Blackwell)
-    if requested_mode == 'sageattn_3':
-        if SAGE_ATTN_3_AVAILABLE:
-            return requested_mode
-        if SAGE_ATTN_2_AVAILABLE:
-            if debug:
-                debug.log(
-                    "SageAttention 3 (Blackwell) not available (requires RTX 50xx GPU and sageattn3 package).\n"
-                    "Falling back to SageAttention 2.",
-                    level="WARNING", category="setup", force=True
-                )
-            return 'sageattn_2'
-        error_msg = (
-            "Cannot use 'sageattn_3' attention mode: SageAttention is not installed.\n"
-            "\n"
-            "SageAttention 3 provides maximum speedup on Blackwell (RTX 50xx) GPUs.\n"
-            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
-            "\n"
-            "To fix this issue:\n"
-            "  1. Install SageAttention: pip install sageattention\n"
-            "  2. For SA3 Blackwell support: pip install sageattn3\n"
-            "  3. OR change attention_mode to 'flash_attn_2' or 'sdpa'\n"
-            "\n"
-            "For more info: https://github.com/thu-ml/SageAttention"
-        )
-        if debug:
-            debug.log(error_msg, level="WARNING", category="setup", force=True)
-        return 'sdpa'
-    
-    # SageAttention 2
-    if requested_mode == 'sageattn_2':
-        if SAGE_ATTN_2_AVAILABLE:
+    # Sparse SageAttention (default accelerated mode)
+    if requested_mode in ('sparse_sage_attention', 'sparse_sage', 'sageattn_2', 'sageattn_3', 'auto'):
+        if SPARSE_SAGE_AVAILABLE:
             if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] < 8:
                 if debug:
                     debug.log(
-                        "SageAttention 2 Triton kernel requires Compute Capability >= 8.0 (Ampere/Ada/Hopper/L4);\n"
+                        "Sparse SageAttention Triton INT8 kernel requires Compute Capability >= 8.0 (Ampere/Ada/Hopper/L4);\n"
                         "falling back to PyTorch SDPA on SM 7.5 (Tesla T4).",
                         category="setup"
                     )
                 return 'sdpa'
-            return requested_mode
+            return 'sparse_sage_attention'
         error_msg = (
-            "Cannot use 'sageattn_2' attention mode: SageAttention is not installed.\n"
-            "\n"
-            "SageAttention provides speedup on NVIDIA GPUs through optimized CUDA kernels.\n"
-            "Falling back to PyTorch SDPA (scaled dot-product attention).\n"
-            "\n"
-            "To fix this issue:\n"
-            "  1. Install SageAttention: pip install sageattention\n"
-            "  2. OR change attention_mode to 'flash_attn_2' or 'sdpa'\n"
-            "\n"
-            "For more info: https://github.com/thu-ml/SageAttention"
+            "Sparse SageAttention is not available (requires triton).\n"
+            "Falling back to PyTorch SDPA (scaled dot-product attention)."
         )
         if debug:
             debug.log(error_msg, level="WARNING", category="setup", force=True)
         return 'sdpa'
-    
     return requested_mode
 
 
@@ -302,170 +246,64 @@ def pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=N
 
 
 @torch._dynamo.disable
-def call_sage_attn_2_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
+def call_sparse_sage_attn_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
     """
-    Wrapper for SageAttention 2 sageattn_varlen that handles tensor-to-scalar conversion.
-    
-    SageAttention 2 provides optimized attention for NVIDIA GPUs with native varlen support.
-    Works on most modern NVIDIA GPUs.
-    
-    This function is excluded from torch.compile because:
-    1. SageAttention is a C++ extension that can't be compiled anyway
-    2. It requires Python int scalars for max_seqlen parameters
-    3. Disabling compilation here keeps the rest of the model compilable
-    
-    Args:
-        q: Query tensor (total_seq, heads, head_dim)
-        k: Key tensor (total_seq, heads, head_dim)
-        v: Value tensor (total_seq, heads, head_dim)
-        cu_seqlens_q: Cumulative sequence lengths for queries
-        cu_seqlens_k: Cumulative sequence lengths for keys
-        max_seqlen_q: Maximum query sequence length (can be tensor or int)
-        max_seqlen_k: Maximum key sequence length (can be tensor or int)
-        **kwargs: Additional arguments (causal supported, others ignored)
-        
-    Returns:
-        Attention output tensor (total_seq, heads, head_dim)
+    Wrapper for Sparse SageAttention that handles varlen format.
+    Converts varlen (total_seq, heads, dim) to batched (B, heads, seq, dim)
+    for uniform batches, or processes sequence splits for variable lengths.
     """
-    if not SAGE_ATTN_2_AVAILABLE:
-        raise ImportError("SageAttention 2 is not available")
+    if not SPARSE_SAGE_AVAILABLE or sparse_sageattn is None:
+        return pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs)
     
-    # Convert tensor max_seqlen to Python int if needed
-    if torch.is_tensor(max_seqlen_q):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if torch.is_tensor(max_seqlen_k):
-        max_seqlen_k = int(max_seqlen_k.item())
-    
-    # SageAttention requires half precision (fp16/bf16)
     out_dtype = q.dtype
-    half_dtypes = (torch.float16, torch.bfloat16)
-    
-    if not (q.dtype == k.dtype == v.dtype):
-        k = k.to(q.dtype)
-        v = v.to(q.dtype)
-    
-    if q.dtype not in half_dtypes:
-        q = q.to(torch.bfloat16)
-        k = k.to(torch.bfloat16)
-        v = v.to(torch.bfloat16)
-    
-    is_causal = kwargs.get('causal', False)
-    sm_scale = 1.0 / (q.shape[-1] ** 0.5)
-    
-    try:
-        out = sageattn_varlen(
-            q, k, v,
-            cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q, max_seqlen_k,
-            is_causal, sm_scale
-        )
-    except Exception:
-        out = pytorch_varlen_attention(
-            q, k, v, cu_seqlens_q, cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q, max_seqlen_k=max_seqlen_k,
-            **kwargs
-        )
-    return out.to(out_dtype) if out.dtype != out_dtype else out
-
-
-@torch._dynamo.disable
-def call_sage_attn_3_varlen(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs):
-    """
-    Wrapper for SageAttention 3 (Blackwell) that converts varlen format to batched format.
-    
-    SageAttention 3 / Blackwell provides maximum performance on RTX 50xx series GPUs.
-    However, it only supports batched attention (uniform sequence lengths), not varlen.
-    
-    This wrapper detects uniform-length batches and reshapes accordingly.
-    For variable-length sequences, it automatically falls back to SageAttention 2.
-    
-    This function is excluded from torch.compile because:
-    1. SageAttention is a C++ extension that can't be compiled anyway
-    2. It requires Python int scalars for max_seqlen parameters
-    3. The varlen-to-batched conversion involves dynamic shapes
-    4. Disabling compilation here keeps the rest of the model compilable
-    
-    Args:
-        q: Query tensor (total_seq, heads, head_dim)
-        k: Key tensor (total_seq, heads, head_dim)
-        v: Value tensor (total_seq, heads, head_dim)
-        cu_seqlens_q: Cumulative sequence lengths for queries
-        cu_seqlens_k: Cumulative sequence lengths for keys
-        max_seqlen_q: Maximum query sequence length (can be tensor or int)
-        max_seqlen_k: Maximum key sequence length (can be tensor or int)
-        **kwargs: Additional arguments (passed to SA2 fallback if needed)
-        
-    Returns:
-        Attention output tensor (total_seq, heads, head_dim)
-    """
-    if not SAGE_ATTN_3_AVAILABLE:
-        raise ImportError("SageAttention 3 (Blackwell) is not available")
-    
-    # Convert tensor max_seqlen to Python int if needed
-    if torch.is_tensor(max_seqlen_q):
-        max_seqlen_q = int(max_seqlen_q.item())
-    if torch.is_tensor(max_seqlen_k):
-        max_seqlen_k = int(max_seqlen_k.item())
-    
-    # Check if all sequences have uniform length (required for SA3 batched API)
-    # SA3/Blackwell uses batched attention, not varlen, so we need uniform lengths
     seq_lens_q = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
     seq_lens_k = cu_seqlens_k[1:] - cu_seqlens_k[:-1]
-    
     uniform_q = (seq_lens_q == seq_lens_q[0]).all()
     uniform_k = (seq_lens_k == seq_lens_k[0]).all()
+    is_causal = kwargs.get('causal', False)
     
-    if not (uniform_q and uniform_k):
-        # Fall back to SA2 for variable-length sequences
-        # This is expected behavior - SA3 Blackwell doesn't support varlen natively
-        if SAGE_ATTN_2_AVAILABLE:
-            return call_sage_attn_2_varlen(
-                q, k, v, cu_seqlens_q, cu_seqlens_k,
-                max_seqlen_q, max_seqlen_k, **kwargs
-            )
-        raise RuntimeError(
-            "SageAttention 3 (Blackwell) requires uniform sequence lengths, "
-            "and SageAttention 2 is not available as fallback. "
-            "Please install sageattention package or use flash_attn/sdpa instead."
-        )
-    
-    # Extract batch dimensions
-    batch_size = len(cu_seqlens_q) - 1
-    seq_len_q = int(seq_lens_q[0].item())
-    seq_len_k = int(seq_lens_k[0].item())
-    heads = q.shape[1]
-    dim = q.shape[2]
-    
-    # SageAttention requires half precision (fp16/bf16)
-    out_dtype = q.dtype
-    half_dtypes = (torch.float16, torch.bfloat16)
-    
-    if not (q.dtype == k.dtype == v.dtype):
-        k = k.to(q.dtype)
-        v = v.to(q.dtype)
-    
-    if q.dtype not in half_dtypes:
-        q = q.to(torch.bfloat16)
-        k = k.to(torch.bfloat16)
-        v = v.to(torch.bfloat16)
-    
-    # Reshape varlen (total_seq, heads, dim) -> batched (batch, seq, heads, dim)
-    q_batched = q.view(batch_size, seq_len_q, heads, dim)
-    k_batched = k.view(batch_size, seq_len_k, heads, dim)
-    v_batched = v.view(batch_size, seq_len_k, heads, dim)
-    
-    # SA3/Blackwell expects (batch, heads, seq, dim) layout
-    q_batched = q_batched.transpose(1, 2)  # (batch, heads, seq, dim)
-    k_batched = k_batched.transpose(1, 2)
-    v_batched = v_batched.transpose(1, 2)
-    
-    # Call SA3 Blackwell
-    out = sageattn_blackwell(q_batched, k_batched, v_batched, per_block_mean=False)
-    
-    # Reshape back to varlen format (total_seq, heads, dim)
-    out = out.transpose(1, 2).reshape(-1, heads, dim).contiguous()
-    
-    return out.to(out_dtype) if out.dtype != out_dtype else out
+    if uniform_q and uniform_k:
+        batch_size = len(cu_seqlens_q) - 1
+        seq_len_q = int(seq_lens_q[0].item())
+        seq_len_k = int(seq_lens_k[0].item())
+        heads = q.shape[1]
+        dim = q.shape[2]
+        
+        # Reshape varlen (total_seq, heads, dim) -> batched (B, heads, seq, dim)
+        q_b = q.view(batch_size, seq_len_q, heads, dim).transpose(1, 2).contiguous()
+        k_b = k.view(batch_size, seq_len_k, heads, dim).transpose(1, 2).contiguous()
+        v_b = v.view(batch_size, seq_len_k, heads, dim).transpose(1, 2).contiguous()
+        
+        try:
+            out = sparse_sageattn(q_b, k_b, v_b, is_causal=is_causal, tensor_layout="HND")
+            # Reshape back to varlen format (total_seq, heads, dim)
+            out = out.transpose(1, 2).reshape(-1, heads, dim).contiguous()
+            return out.to(out_dtype)
+        except Exception:
+            return pytorch_varlen_attention(q, k, v, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, **kwargs)
+    else:
+        # Sequence-split handling for non-uniform sequences
+        q_splits = list(torch.tensor_split(q, cu_seqlens_q[1:-1].long().cpu(), dim=0))
+        k_splits = list(torch.tensor_split(k, cu_seqlens_k[1:-1].long().cpu(), dim=0))
+        v_splits = list(torch.tensor_split(v, cu_seqlens_k[1:-1].long().cpu(), dim=0))
+        outputs = []
+        for q_i, k_i, v_i in zip(q_splits, k_splits, v_splits):
+            q_in = q_i.unsqueeze(0).transpose(1, 2).contiguous()
+            k_in = k_i.unsqueeze(0).transpose(1, 2).contiguous()
+            v_in = v_i.unsqueeze(0).transpose(1, 2).contiguous()
+            try:
+                out_i = sparse_sageattn(q_in, k_in, v_in, is_causal=is_causal, tensor_layout="HND")
+                out_i = out_i.transpose(1, 2).squeeze(0).contiguous()
+                outputs.append(out_i.to(out_dtype))
+            except Exception:
+                out_i = F.scaled_dot_product_attention(
+                    q_i.permute(1, 0, 2).unsqueeze(0),
+                    k_i.permute(1, 0, 2).unsqueeze(0),
+                    v_i.permute(1, 0, 2).unsqueeze(0),
+                    is_causal=is_causal
+                ).squeeze(0).permute(1, 0, 2)
+                outputs.append(out_i.to(out_dtype))
+        return torch.cat(outputs, dim=0)
 
 
 # 2. Triton - Required for torch.compile with inductor backend
@@ -568,33 +406,21 @@ if not os.environ.get("SEEDVR2_OPTIMIZATIONS_LOGGED"):
     os.environ["SEEDVR2_OPTIMIZATIONS_LOGGED"] = "1"
     
     # Build status strings
-    sage_status = "✅" if SAGE_ATTN_AVAILABLE else "❌"
+    sparse_sage_status = "✅" if SPARSE_SAGE_AVAILABLE else "❌"
     flash_status = "✅" if FLASH_ATTN_AVAILABLE else "❌"
     triton_status = "✅" if TRITON_AVAILABLE else "❌"
     
     # Count available optimizations
-    available = [SAGE_ATTN_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
+    available = [SPARSE_SAGE_AVAILABLE, FLASH_ATTN_AVAILABLE, TRITON_AVAILABLE]
     num_available = sum(available)
     
     if num_available == 3:
-        print(f"⚡ SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
+        print(f"⚡ SeedVR2 optimizations check: Sparse SageAttention {sparse_sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
     elif num_available == 0:
-        print(f"⚠️  SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-        print("💡 For best performance: pip install sageattention flash-attn triton")
+        print(f"⚠️  SeedVR2 optimizations check: Sparse SageAttention {sparse_sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
     else:
         icon = "⚡" if num_available >= 2 else "⚠️ "
-        print(f"{icon} SeedVR2 optimizations check: SageAttention {sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
-        
-        # Build install suggestions for missing packages
-        missing = []
-        if not SAGE_ATTN_AVAILABLE:
-            missing.append("sageattention")
-        if not FLASH_ATTN_AVAILABLE:
-            missing.append("flash-attn")
-        if not TRITON_AVAILABLE:
-            missing.append("triton")
-        if missing:
-            print(f"💡 Optional: pip install {' '.join(missing)}")
+        print(f"{icon} SeedVR2 optimizations check: Sparse SageAttention {sparse_sage_status} | Flash Attention {flash_status} | Triton {triton_status}")
     
     # Conv3d workaround status (if applicable)
     if NVIDIA_CONV3D_MEMORY_BUG_WORKAROUND:

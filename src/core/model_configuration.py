@@ -144,11 +144,10 @@ def _describe_attention_mode(attention_mode: Optional[str]) -> str:
         return "sdpa (default)"
     
     mode_descriptions = {
+        'sparse_sage_attention': 'Sparse SageAttention (INT8 Triton)',
         'sdpa': 'PyTorch SDPA',
         'flash_attn_2': 'Flash Attention 2',
         'flash_attn_3': 'Flash Attention 3',
-        'sageattn_2': 'SageAttention 2',
-        'sageattn_3': 'SageAttention 3 (Blackwell)'
     }
     
     return mode_descriptions.get(attention_mode, attention_mode)
@@ -527,7 +526,7 @@ def configure_runner(
     decode_tile_size: Optional[Tuple[int, int]] = None,
     decode_tile_overlap: Optional[Tuple[int, int]] = None,
     tile_debug: str = "false",
-    attention_mode: str = 'sdpa',
+    attention_mode: str = 'sparse_sage_attention',
 
 ) -> VideoDiffusionInfer:
     """

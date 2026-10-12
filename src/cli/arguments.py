@@ -180,9 +180,9 @@ def _add_vae_group(parser: argparse.ArgumentParser) -> None:
 
 def _add_perf_group(parser: argparse.ArgumentParser) -> None:
     perf_group = parser.add_argument_group('Performance optimization')
-    perf_group.add_argument("--attention_mode", type=str, default="sageattn_2",
-                        choices=["sdpa", "flash_attn_2", "flash_attn_3", "sageattn_2", "sageattn_3"],
-                        help="Attention backend: 'sageattn_2' (default, fast INT8/FP16), 'flash_attn_2' (Ampere/Ada/Hopper/L4), 'flash_attn_3', 'sageattn_3', or 'sdpa'")
+    perf_group.add_argument("--attention_mode", type=str, default="sparse_sage_attention",
+                        choices=["sdpa", "flash_attn_2", "flash_attn_3", "sparse_sage_attention", "sageattn_2", "sageattn_3"],
+                        help="Attention backend: 'sparse_sage_attention' (default, fast INT8 Triton kernel, zero compilation), 'flash_attn_2' (Ampere/Ada/Hopper/L4), 'flash_attn_3', or 'sdpa'")
     perf_group.add_argument("--quality_profile", type=str, default="balanced",
                         choices=["detail", "balanced", "throughput"],
                         help="Motion-aware dynamic budget profile: 'detail' (max fidelity), 'balanced' (default), or 'throughput' (fastest)")

@@ -81,7 +81,7 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 ### Attention Backends & Pre-built FlashAttention-2 Installation
 
 SeedVR2-cli supports multiple attention backends (`--attention_mode`):
-- **`sageattn_2`** (Default): Fast INT8/FP16 kernels. Installs instantly via `pip install sageattention`. Recommended on SM 8.0+ (L4/A100) and automatically falls back to SDPA on SM 7.5 (T4).
+- **`sparse_sage_attention`** (Default): Fast in-tree INT8 Triton kernel with zero compilation. Recommended on SM 8.0+ (L4/A100) and automatically falls back to SDPA on SM 7.5 (T4).
 - **`sdpa`**: PyTorch Native Scaled Dot-Product Attention (built-in, zero installation required).
 - **`flash_attn_2`**: Optimized CUDA attention for Ampere, Ada and Hopper GPUs (SM 8.0+). **Do not build from source** (compilation takes ~25 minutes). Install pre-built binary wheels directly:
 
@@ -142,7 +142,7 @@ Measured on Google Colab L4 upscaling video from 640×360 to **1080p (1920×1080
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q8_0.gguf \
   --resolution 1080 --batch_size 9 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_best_quality.mp4
 ```
 
@@ -151,7 +151,7 @@ python inference_cli.py input.mp4 \
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_3b-Q4_K_M.gguf \
   --resolution 1080 --batch_size 13 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_fastest.mp4
 ```
 
@@ -161,7 +161,7 @@ python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b-Q4_K_M.gguf \
   --resolution 1080 --batch_size 9 \
   --chunk_size 33 --temporal_overlap 3 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_long_video.mp4
 ```
 
@@ -170,7 +170,7 @@ python inference_cli.py input.mp4 \
 python inference_cli.py input.mp4 \
   --dit_model seedvr2_ema_7b_fp16.safetensors \
   --resolution 1080 --batch_size 5 \
-  --attention_mode sageattn_2 --keep_on_vram \
+  --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_short_video.mp4
 ```
 

@@ -185,10 +185,11 @@ class Debug:
             cudnn_ver = "N/A"
         
         # Flash Attn, SageAttn & Triton - reuse existing module constants
+        # Flash Attn, Sparse SageAttn & Triton - reuse existing module constants
         try:
             from ..optimization.compatibility import (
                 FLASH_ATTN_2_AVAILABLE, FLASH_ATTN_3_AVAILABLE,
-                SAGE_ATTN_2_AVAILABLE, SAGE_ATTN_3_AVAILABLE,
+                SPARSE_SAGE_AVAILABLE,
                 TRITON_AVAILABLE
             )
             fa_parts = []
@@ -197,21 +198,14 @@ class Debug:
             if FLASH_ATTN_2_AVAILABLE:
                 fa_parts.append("2")
             flash_str = f"v{','.join(fa_parts)} ✓" if fa_parts else "✗"
-            
-            sa_parts = []
-            if SAGE_ATTN_3_AVAILABLE:
-                sa_parts.append("3")
-            if SAGE_ATTN_2_AVAILABLE:
-                sa_parts.append("2")
-            sage_str = f"v{','.join(sa_parts)} ✓" if sa_parts else "✗"
-            
+            sage_str = "✓" if SPARSE_SAGE_AVAILABLE else "✗"
             triton_str = "✓" if TRITON_AVAILABLE else "✗"
         except ImportError:
             flash_str = sage_str = triton_str = "?"
         
         # Print
         self.log(f"OS: {os_str} | GPU: {gpu_str}", category="info")
-        self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | FlashAttn: {flash_str} | SageAttn: {sage_str} | Triton: {triton_str}", category="info")
+        self.log(f"Python: {py_ver} | PyTorch: {torch_ver} | FlashAttn: {flash_str} | SparseSage: {sage_str} | Triton: {triton_str}", category="info")
         cuda_line = f"CUDA: {cuda_ver} | cuDNN: {cudnn_ver}"
         self.log(cuda_line, category="info")
         self.log("", category="none")

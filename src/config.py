@@ -68,7 +68,7 @@ class InferenceConfig:
     vae: VAEConfig = field(default_factory=VAEConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
     swap: BlockSwapConfig = field(default_factory=BlockSwapConfig)
-    attention_mode: str = "sageattn_2"
+    attention_mode: str = "sparse_sage_attention"
     memory_policy: str = "auto"
     quality_profile: str = "balanced"
     motion_intensity: float = 1.0
