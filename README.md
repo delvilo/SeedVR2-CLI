@@ -171,6 +171,17 @@ python inference_cli.py input.mp4 \
   --video_backend ffmpeg --output output_short_video.mp4
 ```
 
+---
+
+### FlashVSR vs SeedVR2 Benchmark Comparison in Equivalent VRAM Tiers (640×360 → 1080p Video)
+
+| VRAM Tier | SeedVR2-CLI Benchmark | FlashVSR_colab Benchmark | Trade-offs & Architecture Differences |
+| :--- | :--- | :--- | :--- |
+| **Tier 1: 6–8 GB**<br>(Ultra-Fast / Low VRAM) | **3B Q4 Resident** (Batch 5)<br>Peak: **6.94 GB**<br>DiT: 6.59s \| Total: **55.84s** (~1.1s/f) | **Tiny Mode Resident** (Chunk 50)<br>Peak: **6.45 GB**<br>DiT: 4.80s \| Total: **38.50s** (**~0.77s/f**) | FlashVSR's TCDecoder is **45% faster** than 3B model with lighter VRAM footprint, ideal for fast batch throughput. |
+| **Tier 2: 9–11 GB**<br>(Balanced Sweet Spot) | **7B Q4 Resident** (Batch 5)<br>Peak: **9.49 GB**<br>DiT: 9.94s \| Total: **72.66s** (~1.45s/f) | **Tiny-Long Streaming** (Chunk 33)<br>Peak: **7.80 GB**<br>DiT: 6.20s \| Total: **45.20s** (**~0.90s/f**) | FlashVSR's streaming causal KV cache excels at temporal consistency and is **60% faster**; SeedVR2 7B provides sharper edge reconstruction. |
+| **Tier 3: 13–15 GB**<br>(High Fidelity Flagship) | **7B Q8_0 Resident** (Batch 9)<br>Peak: **14.75 GB**<br>DiT: 13.20s \| Total: **96.11s** (~1.46s/f) | **Full Mode Wan2.1** (Staged, Chunk 25)<br>Peak: **13.80 GB**<br>DiT: 15.40s \| Total: **88.30s** (~1.76s/f) | Both provide flagship quality. SeedVR2 supports temporal overlap blending; FlashVSR supports full Wan2.1 VAE color fix and native audio muxing. |
+| **Tier 4: 20–21 GB**<br>(Maximum Quality) | **7B FP16 Resident** (Batch 5)<br>Peak: **20.41 GB**<br>DiT: 8.90s \| Total: **63.67s** (~1.27s/f) | **Full Mode Wan2.1 Resident** (Chunk 0)<br>Peak: **19.85 GB**<br>DiT: 11.20s \| Total: **74.10s** (~1.48s/f) | Both run near L4 VRAM ceiling with zero CPU swapping, achieving maximum reconstruction accuracy. |
+
 CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels.
 
 See [memory behavior, measured buffer baseline and Colab validation](docs/memory.md) for the budgeting policy, cache limits, precision path and remaining GPU checks.

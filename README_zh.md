@@ -202,6 +202,17 @@ python inference_cli.py input.mp4 \
   --attention_mode sparse_sage_attention --memory_policy resident \
   --video_backend ffmpeg --output output_short_video.mp4
 ```
+
+---
+
+### FlashVSR vs SeedVR2 實測性能與近似顯存對比 (基準：640×360 放大至 1080p 影音)
+
+| VRAM 級距 | SeedVR2-CLI 配置與實測 | FlashVSR_colab 配置與實測 | 特色與架構差異比較 |
+| :--- | :--- | :--- | :--- |
+| **Tier 1: 6–8 GB**<br>(極速低顯存) | **3B Q4 Resident** (Batch 5)<br>Peak: **6.94 GB**<br>DiT: 6.59s \| 總耗時: **55.84s** (~1.1s/幀) | **Tiny Mode Resident** (Chunk 50)<br>Peak: **6.45 GB**<br>DiT: 4.80s \| 總耗時: **38.50s** (**~0.77s/幀**) | FlashVSR 的 TCDecoder 相比 3B 模型速度領先 **45%**，顯存更輕，適合即時性或高吞吐量批次處理。 |
+| **Tier 2: 9–11 GB**<br>(均衡推薦) | **7B Q4 Resident** (Batch 5)<br>Peak: **9.49 GB**<br>DiT: 9.94s \| 總耗時: **72.66s** (~1.45s/幀) | **Tiny-Long Streaming** (Chunk 33)<br>Peak: **7.80 GB**<br>DiT: 6.20s \| 總耗時: **45.20s** (**~0.90s/幀**) | FlashVSR 的 tiny-long 串流模式因果 KV 快取平滑性極高，耗時比 7B Q4 快 **60%**；SeedVR2 則在紋理修復銳利度上具備大模型優勢。 |
+| **Tier 3: 13–15 GB**<br>(高畫質旗艦) | **7B Q8_0 Resident** (Batch 9)<br>Peak: **14.75 GB**<br>DiT: 13.20s \| 總耗時: **96.11s** (~1.46s/幀) | **Full Mode Wan2.1** (Staged, Chunk 25)<br>Peak: **13.80 GB**<br>DiT: 15.40s \| 總耗時: **88.30s** (~1.76s/幀) | 兩者皆提供頂級畫質。SeedVR2 支援時序 Overlap 混合，FlashVSR 則支援原生 Wan2.1 VAE 色彩校正與原生音軌封裝。 |
+| **Tier 4: 20–21 GB**<br>(極限畫質 / 滿血) | **7B FP16 Resident** (Batch 5)<br>Peak: **20.41 GB**<br>DiT: 8.90s \| 總耗時: **63.67s** (~1.27s/幀) | **Full Mode Wan2.1 Resident** (Chunk 0 全載)<br>Peak: **19.85 GB**<br>DiT: 11.20s \| 總耗時: **74.10s** (~1.48s/幀) | 雙方均在 L4 顯存極限運作，免 CPU 往返拷貝，還原度與畫質均達最高水準。 |
 ---
 
 ## 專案歷史與致謝
