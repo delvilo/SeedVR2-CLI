@@ -1,4 +1,6 @@
-# SeedVR2-cli — 獨立 CLI 影像與影片超解析度放大工具
+# SeedVR2-cli · v2.7.0 — 獨立 CLI 影像與影片超解析度放大工具
+
+> 🤖 **聲明**：本專案由 AI 輔助架構重構、工程實作與效能優化完成。
 
 SeedVR2 是基於 Linux 命令列的影像與影片超解析度放大工具。推理管線採用單張 NVIDIA GPU 運行，並支援 CPU 平行計算進行卸載（Offload）與前處理，具備目錄批次處理、有限視訊流式傳輸、模型記憶體復用、VAE Tiling 分塊編解碼、DiT BlockSwap 區塊交換，以及長影片中斷續傳（--resume）。
 
@@ -104,6 +106,7 @@ python inference_cli.py media_folder/ \
 | `--video_backend` | 視訊編碼器後端：`opencv` 或 `ffmpeg`（支援 `--10bit` 高動態範圍）。 |
 | `--debug` | 輸出詳細除錯訊息、時延分析與顯存即時監控數據。 |
 | `--resume` | 開啟長影片中斷續傳功能。自動掃描並接續已完成的分段檢查點，全片完成後 1 秒無損合併。 |
+| `--nvenc` | 開啟 NVIDIA GPU 硬體加速 H.265 編碼（hevc_nvenc），採用 P7 HQ 旗艦預設，輸出極速且接近視覺無損。 |
 
 ### 注意力機制與預編譯 FlashAttention-2 安裝指令
 

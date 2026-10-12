@@ -96,6 +96,7 @@ class OutputConfig:
     format: Literal["mp4", "png"] | None = None
     video_backend: Literal["opencv", "ffmpeg"] = "ffmpeg"
     use_10bit: bool = False
+    nvenc: bool = False
 
 
 @dataclass(frozen=True, slots=True)

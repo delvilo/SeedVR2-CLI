@@ -76,6 +76,8 @@ def _add_io_group(parser: argparse.ArgumentParser) -> None:
     io_group.add_argument("--10bit", dest="use_10bit", action="store_true",
                         help="Save 10-bit video with x265 codec (reduces banding). Without this flag, "
                              "ffmpeg uses x264 for maximum compatibility. Requires --video_backend ffmpeg")
+    io_group.add_argument("--nvenc", action="store_true",
+                        help="Use NVIDIA NVENC hardware-accelerated H.265 encoding (hevc_nvenc) with P7 HQ preset for high-speed, near-lossless output")
     io_group.add_argument("--model_dir", type=str, default=None,
                         help="Model directory (default: $SEEDVR2_MODEL_DIR or repo/models/SEEDVR2)")
 
@@ -313,6 +315,7 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
             format=a.output_format,
             video_backend=a.video_backend,
             use_10bit=a.use_10bit,
+            nvenc=a.nvenc,
         ),
         input=a.input,
         cuda_device=a.cuda_device if a.cuda_device is not None else 0,

@@ -24,22 +24,39 @@ def frame_pixels(frame, high_bit_depth=False):
 
 
 class FFMPEGVideoWriter:
-    def __init__(self, path, width, height, fps, use_10bit=False):
+    def __init__(self, path, width, height, fps, use_10bit=False, use_nvenc=False):
         self.high_bit_depth = use_10bit
         self.errors = tempfile.TemporaryFile()
         self.proc = None
-        try:
-            self.proc = subprocess.Popen([
+        if use_nvenc:
+            cmd_nvenc = [
+                'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
+                '-f', 'rawvideo', '-pix_fmt', 'rgb48le' if use_10bit else 'rgb24',
+                '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
+                '-c:v', 'hevc_nvenc',
+                '-preset', 'p7', '-tune', 'hq', '-rc', 'vbr', '-cq', '20', '-b:v', '0',
+                '-multipass', 'fullres', '-bf', '3', '-b_ref_mode', 'middle',
+                '-rc-lookahead', '32', '-spatial-aq', '1', '-temporal-aq', '1',
+                '-pix_fmt', 'p010le' if use_10bit else 'yuv420p', str(path)
+            ]
+            try:
+                self.proc = subprocess.Popen(cmd_nvenc, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.errors)
+            except Exception:
+                self.proc = None
+        if self.proc is None:
+            cmd_cpu = [
                 'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',
                 '-f', 'rawvideo', '-pix_fmt', 'rgb48le' if use_10bit else 'rgb24',
                 '-s', f'{width}x{height}', '-r', str(fps), '-i', '-',
                 '-c:v', 'libx265' if use_10bit else 'libx264',
                 '-pix_fmt', 'yuv420p10le' if use_10bit else 'yuv420p',
-                '-preset', 'medium', '-crf', '12', str(path)],
-                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.errors)
-        except BaseException:
-            self.errors.close()
-            raise
+                '-preset', 'medium', '-crf', '12', str(path)
+            ]
+            try:
+                self.proc = subprocess.Popen(cmd_cpu, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.errors)
+            except BaseException:
+                self.errors.close()
+                raise
 
     def isOpened(self):
         return self.proc is not None and self.proc.poll() is None
@@ -214,6 +231,7 @@ def save_frames_to_video(
     writer: cv2.VideoWriter | FFMPEGVideoWriter | None = None,
     video_backend: str = "ffmpeg",
     use_10bit: bool = False,
+    use_nvenc: bool = False,
     *, debug: Debug
 ) -> cv2.VideoWriter | FFMPEGVideoWriter:
     """
@@ -242,7 +260,7 @@ def save_frames_to_video(
         os.makedirs(Path(output_path).parent, exist_ok=True)
         if video_backend == "ffmpeg":
             try:
-                writer = FFMPEGVideoWriter(output_path, W, H, fps, use_10bit)
+                writer = FFMPEGVideoWriter(output_path, W, H, fps, use_10bit, use_nvenc)
             except Exception as exc:
                 debug.log(f"FFmpeg writer failed ({exc}), falling back to OpenCV VideoWriter", level="WARNING", category="file")
                 fourcc = cv2.VideoWriter.fourcc(*'mp4v')
@@ -327,7 +345,7 @@ class OutputSink:
         if self.config.format == 'mp4':
             self.writer = save_frames_to_video(batch, self.path, self.fps,
                 writer=self.writer, video_backend=self.config.video_backend,
-                use_10bit=self.config.use_10bit, debug=self.debug)
+                use_10bit=self.config.use_10bit, use_nvenc=getattr(self.config, 'nvenc', False), debug=self.debug)
         elif self.kind == 'image':
             _save_image_bgr(frame_pixels(batch[0]), self.path)
         else:

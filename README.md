@@ -1,4 +1,6 @@
-# SeedVR2-cli — standalone CLI
+# SeedVR2-cli · v2.7.0 — standalone CLI
+
+> 🤖 **Notice**: This project was developed, refactored, and optimized with AI assistance.
 
 SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and resumable long video processing across sessions.
 **Key Improvements & Fixes**:
@@ -70,6 +72,7 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --attention_mode | PyTorch SDPA is the default. Optional Flash/Sage backends require separate compatible installations. |
 | --resume | Resume an interrupted long video upscale from existing chunk checkpoints. |
 | --video_backend ffmpeg / --10bit | Encode MP4 using FFmpeg, optionally with 10-bit x265 output. |
+| --nvenc | Use NVIDIA NVENC hardware-accelerated H.265 encoding (hevc_nvenc) with P7 HQ preset for near-lossless high-speed output. |
 | --debug | Show environment, timing, VRAM, and processing details. |
 | --cuda_device | Select one visible CUDA device index; defaults to device 0. |
 
