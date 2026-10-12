@@ -142,7 +142,7 @@ class Debug:
         # Version and credits - left/right aligned to logo width
         version_text = f"v{__version__}"
         left_part = f"💻 CLI · {version_text}"
-        right_part = "© ByteDance Seed · NumZ · AInVFX"
+        right_part = "© NumZ · AInVFX"
         logo_width = 75
         padding = logo_width - len(left_part) - len(right_part) - 1
         self.log(f"{left_part}{' ' * max(1, padding)}{right_part}", category="none", force=True, indent_level=1)

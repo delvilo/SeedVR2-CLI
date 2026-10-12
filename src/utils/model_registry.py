@@ -17,29 +17,30 @@ class ModelInfo:
     size: str = "3B" # '3B', '7B', etc.
     variant: Optional[str] = None # 'sharp', etc.
     sha256: Optional[str] = None # Cached hash
+    min_vram_gb: float = 6.0 # Estimated minimum VRAM (GiB) required without BlockSwap
 
 # Model registry with metadata
 MODEL_REGISTRY = {
     # 3B models
-    "seedvr2_ema_3b-Q4_K_M.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="3B", precision="Q4_K_M", sha256="e665e3909de1a8c88a69c609bca9d43ff5a134647face2ce4497640cc3597f0e"),
-    "seedvr2_ema_3b-Q8_0.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="3B", precision="Q8_0", sha256="be0d60083a2051a265eb4b77f28edf494e6db67ffc250216f32b72292e5cbd96"),
-    "seedvr2_ema_3b_fp8_e4m3fn.safetensors": ModelInfo(size="3B", precision="fp8_e4m3fn", sha256="3bf1e43ebedd570e7e7a0b1b60d6a02e105978f505c8128a241cde99a8240cff"),
-    "seedvr2_ema_3b_fp16.safetensors": ModelInfo(size="3B", precision="fp16", sha256="2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304"),
+    "seedvr2_ema_3b-Q4_K_M.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="3B", precision="Q4_K_M", min_vram_gb=5.0, sha256="e665e3909de1a8c88a69c609bca9d43ff5a134647face2ce4497640cc3597f0e"),
+    "seedvr2_ema_3b-Q8_0.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="3B", precision="Q8_0", min_vram_gb=7.0, sha256="be0d60083a2051a265eb4b77f28edf494e6db67ffc250216f32b72292e5cbd96"),
+    "seedvr2_ema_3b_fp8_e4m3fn.safetensors": ModelInfo(size="3B", precision="fp8_e4m3fn", min_vram_gb=7.0, sha256="3bf1e43ebedd570e7e7a0b1b60d6a02e105978f505c8128a241cde99a8240cff"),
+    "seedvr2_ema_3b_fp16.safetensors": ModelInfo(size="3B", precision="fp16", min_vram_gb=9.5, sha256="2fd0e03a3dad24e07086750360727ca437de4ecd456f769856e960ae93e2b304"),
     
     # 7B models
-    "seedvr2_ema_7b-Q4_K_M.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="Q4_K_M", sha256="db9cb2ad90ebd40d2e8c29da2b3fc6fd03ba87cd58cbadceccca13ad27162789"),
-    "seedvr2_ema_7b-Q8_0.gguf": ModelInfo(repo="cmeka/SeedVR2-GGUF", size="7B", precision="Q8_0", sha256="669788655e8f15f306284f267a444e9766c8a421869577b16a961e43029c737b"),
-    "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", sha256="3d68b5ec0b295ae28092e355c8cad870edd00b817b26587d0cb8f9dd2df19bb2"),
-    "seedvr2_ema_7b_fp16.safetensors": ModelInfo(size="7B", precision="fp16", sha256="7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a"),
+    "seedvr2_ema_7b-Q4_K_M.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="Q4_K_M", min_vram_gb=8.5, sha256="db9cb2ad90ebd40d2e8c29da2b3fc6fd03ba87cd58cbadceccca13ad27162789"),
+    "seedvr2_ema_7b-Q8_0.gguf": ModelInfo(repo="cmeka/SeedVR2-GGUF", size="7B", precision="Q8_0", min_vram_gb=12.0, sha256="669788655e8f15f306284f267a444e9766c8a421869577b16a961e43029c737b"),
+    "seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", min_vram_gb=11.5, sha256="3d68b5ec0b295ae28092e355c8cad870edd00b817b26587d0cb8f9dd2df19bb2"),
+    "seedvr2_ema_7b_fp16.safetensors": ModelInfo(size="7B", precision="fp16", min_vram_gb=18.0, sha256="7b8241aa957606ab6cfb66edabc96d43234f9819c5392b44d2492d9f0b0bbe4a"),
     
     # 7B sharp variants
-    "seedvr2_ema_7b_sharp-Q4_K_M.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="Q4_K_M", variant="sharp", sha256="7aed800ac4eb8e0d18569a954c0ff35f5a1caa3ed5d920e66cc31405f75b6e69"),
-    "seedvr2_ema_7b_sharp-Q8_0.gguf": ModelInfo(repo="cmeka/SeedVR2-GGUF", size="7B", precision="Q8_0", variant="sharp", sha256="b1f81cb5700b0b1f432f2c785528356c952c41c74d03d205c6f14b0bd6da303d"),
-    "seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp", sha256="0d2c5b8be0fda94351149c5115da26aef4f4932a7a2a928c6f184dda9186e0be"),
-    "seedvr2_ema_7b_sharp_fp16.safetensors": ModelInfo(size="7B", precision="fp16", variant="sharp", sha256="20a93e01ff24beaeebc5de4e4e5be924359606c356c9c51509fba245bd2d77dd"),
+    "seedvr2_ema_7b_sharp-Q4_K_M.gguf": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="Q4_K_M", variant="sharp", min_vram_gb=8.5, sha256="7aed800ac4eb8e0d18569a954c0ff35f5a1caa3ed5d920e66cc31405f75b6e69"),
+    "seedvr2_ema_7b_sharp-Q8_0.gguf": ModelInfo(repo="cmeka/SeedVR2-GGUF", size="7B", precision="Q8_0", variant="sharp", min_vram_gb=12.0, sha256="b1f81cb5700b0b1f432f2c785528356c952c41c74d03d205c6f14b0bd6da303d"),
+    "seedvr2_ema_7b_sharp_fp8_e4m3fn_mixed_block35_fp16.safetensors": ModelInfo(repo="AInVFX/SeedVR2_comfyUI", size="7B", precision="fp8_e4m3fn_mixed_block35_fp16", variant="sharp", min_vram_gb=11.5, sha256="0d2c5b8be0fda94351149c5115da26aef4f4932a7a2a928c6f184dda9186e0be"),
+    "seedvr2_ema_7b_sharp_fp16.safetensors": ModelInfo(size="7B", precision="fp16", variant="sharp", min_vram_gb=18.0, sha256="20a93e01ff24beaeebc5de4e4e5be924359606c356c9c51509fba245bd2d77dd"),
     
     # VAE models
-    "ema_vae_fp16.safetensors": ModelInfo(category="vae", precision="fp16", sha256="20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1"),
+    "ema_vae_fp16.safetensors": ModelInfo(category="vae", precision="fp16", min_vram_gb=1.5, sha256="20678548f420d98d26f11442d3528f8b8c94e57ee046ef93dbb7633da8612ca1"),
 }
 
 # Configuration constants
@@ -53,6 +54,14 @@ def get_default_models(category: str) -> List[str]:
 def get_model_repo(model_name: str) -> str:
     """Get repository for a specific model"""
     return MODEL_REGISTRY.get(model_name, ModelInfo()).repo
+def get_min_vram(model_name: str) -> float:
+    """Get estimated minimum VRAM in GiB for a specific model"""
+    if model_name in MODEL_REGISTRY:
+        return MODEL_REGISTRY[model_name].min_vram_gb
+    if "7b" in model_name.lower():
+        return 18.0 if "fp16" in model_name.lower() else (11.5 if "fp8" in model_name.lower() else 9.0)
+    return 9.5 if "fp16" in model_name.lower() else (7.0 if "fp8" in model_name.lower() else 5.0)
+
 
 def get_available_dit_models() -> List[str]:
     """Get all available DiT models including those discovered on disk"""

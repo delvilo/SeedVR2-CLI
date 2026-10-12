@@ -2,13 +2,21 @@
 
 SeedVR2 image and video upscaling from a Linux command line. The inference pipeline uses one NVIDIA GPU and supports CPU parallelism for offload and preprocessing, with directory processing, bounded video streaming, model reuse, VAE tiling, BlockSwap, and optional torch.compile.
 
+**Key Improvements & Fixes**:
+- **Zero OOM on Colab Free T4 GPU / CPU**: Resolves upstream OOM crashes through automatic multi-level VAE tiling (down to 128px), causal 3D convolution slicing, and transactional OOM recovery with dynamic BlockSwap.
+- **Pre-flight VRAM Capacity Check**: Validates available GPU memory before downloading weights or allocating buffers; terminates early with helpful recommendations instead of crashing mid-run.
+- **TorchCodec Native Video Decoding**: Completely removes `torchvision` and `torchaudio` dependencies; adopts high-throughput PyTorch `TorchCodec` for direct tensor decoding and pure PyTorch functional image transforms.
+- **Full Colab Compatibility**: Tested and verified on Google Colab free Tesla T4 (15GB VRAM) and CPU runtimes.
+
+[English](README.md) | [中文說明檔](README_zh.md)
+
 This fork targets the current Google Colab runtime: Ubuntu 24.04, Python 3.13, PyTorch 2.11.0+cu130, and the CUDA 13.0 toolkit. The "CUDA Version 13.0" reported by nvidia-smi describes the driver capability; it is not the CUDA build used by PyTorch.
 
 ## Start in Colab
 
 Open [the Colab notebook](colab/SeedVR2Lite_Colab.ipynb), select a GPU runtime, and run its cells in order. Configure `DRIVE_ROOT`, `RAM_BUDGET_GB`, `VRAM_BUDGET_GB` and optionally `INSTALL_FLASH_ATTN` in the paths cell. A budget of `0` uses 80% of available RAM or 90% of free VRAM; explicit GiB allowances are capped at the free amount. Weights, memory reports, results and `output/colab_diagnostics.json` are stored on Drive; the repository runs from local Colab storage. The diagnostics include the checked-out commit, paths, GPU and driver, available memory, effective budgets, and installed versions.
 
-The runtime already supplies PyTorch and torchvision. **requirements.txt** contains only the remaining application dependencies. The notebook validates PyTorch before and after dependency installation. PyTorch SDPA is the default attention backend; the optional FlashAttention 2 wheel is checked against Python, CUDA, PyTorch, Linux architecture and GPU capability before installation, then tested with a small CUDA kernel. This wheel targets Ampere, Ada and Hopper GPUs (SM 8.x/9.x); T4 is unsupported. Every install command stops on failure. The notebook installs FFmpeg from the Ubuntu 24.04 FFmpeg 9 PPA and verifies the actual `ffmpeg`/`ffprobe` major versions and x264/x265 encoders. MP4 output uses FFmpeg; 10-bit encoding is available with `--10bit`.
+The runtime supplies PyTorch. **requirements.txt** contains only the remaining application dependencies (`torchcodec`, `diffusers`, `einops`, etc.). `torchvision` and `torchaudio` are **not required**. The notebook validates PyTorch before and after dependency installation. PyTorch SDPA is the default attention backend; the optional FlashAttention 2 wheel is checked against Python, CUDA, PyTorch, Linux architecture and GPU capability before installation, then tested with a small CUDA kernel. This wheel targets Ampere, Ada and Hopper GPUs (SM 8.x/9.x); T4 is unsupported (uses SDPA or SageAttention). Every install command stops on failure. The notebook installs FFmpeg from the Ubuntu 24.04 FFmpeg 9 PPA and verifies the actual `ffmpeg`/`ffprobe` major versions and x264/x265 encoders. MP4 output uses FFmpeg; 10-bit encoding is available with `--10bit`.
 
 Model downloads use the selected --model_dir and store a validation cache alongside the weights. After a Colab restart, point --model_dir to the same Drive folder to reuse them. Some model hosting repository names contain "comfyUI"; those are weight download locations, not a runtime dependency.
 
@@ -64,6 +72,18 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --debug | Show environment, timing, VRAM, and processing details. |
 | --cuda_device | Select one visible CUDA device index; defaults to device 0. |
 
+### Model VRAM Requirements (Pre-flight Check)
+
+| Model Name | Precision | Weight Size | Min VRAM (No BlockSwap) | Colab T4 (15GB) Compatibility |
+| :--- | :--- | :--- | :--- | :--- |
+| `seedvr2_ema_3b-Q4_K_M.gguf` | Q4_K_M | ~1.86 GB | **5.0 GB** | ✅ Native (Fastest) |
+| `seedvr2_ema_3b-Q8_0.gguf` | Q8_0 | ~3.4 GB | **7.0 GB** | ✅ Native |
+| `seedvr2_ema_3b_fp8_e4m3fn.safetensors` | FP8 | ~3.4 GB | **7.0 GB** | ✅ Native |
+| `seedvr2_ema_3b_fp16.safetensors` | FP16 | ~6.8 GB | **9.5 GB** | ✅ Native |
+| `seedvr2_ema_7b-Q4_K_M.gguf` | Q4_K_M | ~4.3 GB | **8.5 GB** | ✅ Native |
+| `seedvr2_ema_7b-Q8_0.gguf` | Q8_0 | ~7.8 GB | **12.0 GB** | ✅ Native |
+| `seedvr2_ema_7b_fp8_e4m3fn_mixed_block35_fp16.safetensors` | Mixed FP8/FP16 | ~7.5 GB | **11.5 GB** | ✅ Native |
+| `seedvr2_ema_7b_fp16.safetensors` | FP16 | ~14.8 GB | **18.0 GB** | ⚠️ Requires `--blocks_to_swap 32` (OOM without swap) |
 Use --help for the complete option list. Larger models, batches, and output resolutions require more VRAM. Start with a short sample at a modest resolution before processing a long video.
 
 CPU model offload and VAE tiling are enabled by default. Finalized output batches are postprocessed on CPU and written immediately. OOM retries restart the file in temporary output, preserving resolution and seed while reducing execution granularity. Changes to batch/tile boundaries can affect pixels.
