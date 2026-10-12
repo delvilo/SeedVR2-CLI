@@ -68,8 +68,6 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --memory_policy | Memory scheduling: `auto` (default), `staged` (CPU offload between phases), `resident` (all models stay on GPU). |
 | --quality_profile | Output quality target: `detail`, `balanced` (default), `throughput`. Controls motion-adaptive diffusion noise. |
 | --motion_intensity | Motion-aware budget intensity (0.0–2.0, default 1.0). Higher values preserve more detail in high-motion batches. |
-| --ram_budget_gb / --vram_budget_gb | Set memory planning allowances (GiB); 0 uses available-memory defaults. |
-| --cache_ram_gb / --cache_vram_gb | Limit retained model storage; 0 disables that cache tier. |
 | --memory_report / --oom_retries | Record phase peaks to JSONL; retry caught OOMs with smaller workloads. |
 | --attention_mode | PyTorch SDPA is the default. Optional Flash/Sage backends require separate compatible installations. |
 | --resume | Resume an interrupted long video upscale from existing chunk checkpoints. |

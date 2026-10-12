@@ -51,13 +51,13 @@ inference_cli.main(['--help'])
 def test_parser_returns_nested_immutable_settings():
     cfg = parse_arguments(['in.mov', '--batch_size', '9', '--chunk_size', '17',
         '--resume',
-        '--vae_decode_tile_size', '512', '--memory_policy', 'staged', '--cache_ram_gb', '2',
+        '--vae_decode_tile_size', '512', '--memory_policy', 'staged',
         '--blocks_to_swap', '8', '--video_backend', 'ffmpeg', '--10bit',
         '--output', 'out.mp4', '--skip_first_frames', '3', '--load_cap', '11'])
     assert cfg.inference.sampling.batch_size == 9
     assert cfg.video.resume is True
     assert cfg.inference.vae.decode.size == 512
-    assert cfg.inference.memory_policy == "staged" and cfg.inference.cache.ram_gb == 2
+    assert cfg.inference.memory_policy == "staged"
     assert cfg.inference.swap.blocks_to_swap == 8
     assert cfg.output.path == 'out.mp4' and cfg.output.use_10bit
     assert (cfg.video.chunk_size, cfg.video.skip_first_frames, cfg.video.load_cap) == (17, 3, 11)
@@ -69,7 +69,7 @@ def test_parser_returns_nested_immutable_settings():
 
 @pytest.mark.parametrize('argv', [
     ['--cuda_device', '0,1'], ['--cuda_device', '-1'], ['--batch_size', '4'],
-    ['--ram_budget_gb', 'nan'], ['--chunk_size', '-1'], ['--video_backend', 'opencv', '--10bit'],
+    ['--temporal_overlap', 'nan'], ['--chunk_size', '-1'], ['--video_backend', 'opencv', '--10bit'],
 ])
 def test_parser_rejects_invalid_requests_before_loading_models(argv):
     with pytest.raises(SystemExit) as error:
@@ -106,7 +106,7 @@ def test_directory_jobs_do_not_mutate_auto_format_or_sampling(tmp_path):
 def test_planner_does_not_change_next_files_settings(monkeypatch):
     from src.core import planning
     cfg = parse_arguments(['input.mp4', '--batch_size', '33', '--chunk_size', '330',
-                           '--temporal_overlap', '3', '--ram_budget_gb', '2'])
+                           '--temporal_overlap', '3'])
     monkeypatch.setattr(planning, 'available_ram_bytes', lambda: 2 * GIB)
     with InferenceSession() as session:
         plan = planning.plan_file(cfg, 1920, 1080, 'cpu', session, Debug(False))

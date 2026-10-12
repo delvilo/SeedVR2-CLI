@@ -26,11 +26,7 @@ VAE tiling and CPU model offload are enabled by default. `--no-vae_encode_tiled`
 
 | Option | Meaning |
 | --- | --- |
-| `--ram_budget_gb` | Planning allowance in GiB, capped by available RAM; 0 uses 80% of available RAM. Root cgroup v2 limits are included when exposed. |
-| `--vram_budget_gb` | Planning allowance capped by free GPU memory; 0 uses 90% of free VRAM. |
-| `--cache_dit`, `--cache_vae` | Request model retention across chunks/files. Models can still be evicted by the cache policy. |
-| `--cache_ram_gb` | CPU model cache cap, limited to half the RAM allowance. Default is one quarter; explicit 0 disables CPU retention. |
-| `--cache_vram_gb` | GPU model cache cap, limited to half the VRAM allowance. Default 0. Select a CUDA offload target explicitly if GPU retention is wanted. |
+| `--memory_policy` | Memory scheduling: `auto` (default), `staged` (CPU offload between phases), or `resident` (models stay on GPU). |
 | `--memory_report path.jsonl` | Append setup, read, encode, upscale and combined decode/postprocess/write measurements, plans, attempts, retries and completion events. |
 | `--oom_retries` | Maximum retries after the initial attempt, default 3. Set 0 to fail immediately. |
 | `--keep_on_vram` | Keep DiT and VAE resident on GPU across all generation phases (no CPU offload). Eliminates host-device PCIe weight transfer overhead (up to 2× speedup). Requires pre-flight capacity check; aborts with concrete recommendations if concurrent VRAM would cause OOM. |

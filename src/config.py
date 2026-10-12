@@ -49,9 +49,7 @@ class VAEConfig:
 
 @dataclass(frozen=True, slots=True)
 class CacheConfig:
-    ram_gb: float | None = None
-    vram_gb: float = 0.0
-
+    pass
 
 @dataclass(frozen=True, slots=True)
 class BlockSwapConfig:
@@ -83,11 +81,8 @@ class VideoConfig:
 
 @dataclass(frozen=True, slots=True)
 class MemoryConfig:
-    ram_budget_gb: float = 0.0
-    vram_budget_gb: float = 0.0
     oom_retries: int = 3
     report: str | None = None
-
 
 @dataclass(frozen=True, slots=True)
 class OutputConfig:

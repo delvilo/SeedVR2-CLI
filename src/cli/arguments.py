@@ -142,14 +142,9 @@ def _add_device_group(parser: argparse.ArgumentParser) -> None:
                              "or 'resident' (keeps both models in VRAM for maximum speed). Default: auto")
 
 def _add_memory_group(parser: argparse.ArgumentParser) -> None:
-    memory_group = parser.add_argument_group('Memory budgets (GiB; planning estimates, not hard limits)')
-    memory_group.add_argument('--ram_budget_gb', type=float, default=0, help='Total free RAM allowance; 0 = 80%% of available RAM')
-    memory_group.add_argument('--vram_budget_gb', type=float, default=0, help='Free VRAM allowance; 0 = 90%% of available VRAM')
-    memory_group.add_argument('--cache_ram_gb', type=float, default=None, help='CPU model cache cap; default = one quarter of RAM allowance, 0 disables retention')
-    memory_group.add_argument('--cache_vram_gb', type=float, default=0, help='GPU model cache cap; default 0')
+    memory_group = parser.add_argument_group('Memory diagnostics & recovery')
     memory_group.add_argument('--memory_report', type=str, default=None, help='Append phase RSS/CUDA peaks and retry events to JSONL')
     memory_group.add_argument('--oom_retries', type=int, default=3, help='File restarts with smaller chunk/batch/tile sizes after OOM; 0 disables retries')
-
 
 def _add_blockswap_group(parser: argparse.ArgumentParser) -> None:
     blockswap_group = parser.add_argument_group('Memory optimization (BlockSwap)')
@@ -196,8 +191,7 @@ def _add_debug_group(parser: argparse.ArgumentParser) -> None:
 
 def _validate_parsed_arguments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Validate parsed command-line arguments, raising parser errors if invalid."""
-    for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap',
-                 'oom_retries', 'ram_budget_gb', 'vram_budget_gb', 'cache_vram_gb', 'cache_ram_gb'):
+    for name in ('chunk_size', 'temporal_overlap', 'prepend_frames', 'skip_first_frames', 'load_cap', 'oom_retries'):
         value = getattr(args, name)
         if value is not None and (not math.isfinite(value) or value < 0):
             parser.error(f'--{name} must be finite and nonnegative')
@@ -274,10 +268,7 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
                 debug=a.tile_debug,
             ),
 
-            cache=CacheConfig(
-                ram_gb=a.cache_ram_gb,
-                vram_gb=a.cache_vram_gb,
-            ),
+            cache=CacheConfig(),
             swap=BlockSwapConfig(
                 blocks_to_swap=0 if a.memory_policy == "resident" else a.blocks_to_swap,
                 swap_io_components=False if a.memory_policy == "resident" else a.swap_io_components,
@@ -294,8 +285,6 @@ def config_from_namespace(a: argparse.Namespace) -> AppConfig:
             resume=a.resume,
         ),
         memory=MemoryConfig(
-            ram_budget_gb=a.ram_budget_gb,
-            vram_budget_gb=a.vram_budget_gb,
             oom_retries=a.oom_retries,
             report=a.memory_report,
         ),
