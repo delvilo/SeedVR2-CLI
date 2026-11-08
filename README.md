@@ -75,6 +75,55 @@ When --model_dir is omitted, models are stored under **models/SEEDVR2** in the r
 | --debug | Show environment, timing, VRAM, and processing details. |
 | --cuda_device | Select one visible CUDA device index; defaults to device 0. |
 
+
+### Resumable video upscaling (`--resume`)
+
+`--resume` splits a video into `--chunk_size` windows, writes each finished window as its own MP4, and joins them without re-encoding (FFmpeg concat) at the end. It tries to copy the source audio with `-shortest`; if the audio mux fails it falls back to a video-only file. Applies to video input with MP4 output only; not PNG output. Set `--chunk_size` explicitly (e.g. 33) so the chunk boundaries are the same on every run.
+
+**Where files are stored**
+
+| Item | Location |
+| --- | --- |
+| Checkpoint chunks | Hidden folder next to the output file: `<output dir>/.<output name>_chunks/` (e.g. `/content/drive/MyDrive/SeedVR2/output/.video.mp4_chunks/`) containing `chunk_00001.mp4`, ... and `resume_manifest.json` |
+| Final video | The `--output` path |
+| Model weights | `--model_dir` |
+
+The checkpoint folder is deleted automatically after the final video is assembled. If the final output already exists and has at least as many frames as the source, the run is skipped.
+
+**Colab: save to Google Drive first**
+
+The Colab VM disk is wiped on disconnect, so put `--output` (and therefore the checkpoint folder) and `--model_dir` on Drive. The input may stay on Drive too.
+
+~~~python
+from google.colab import drive
+drive.mount('/content/drive')
+~~~
+
+~~~bash
+python inference_cli.py /content/drive/MyDrive/SeedVR2/input/video.mp4 \
+  --resolution 1080 --batch_size 5 --chunk_size 33 --temporal_overlap 3 \
+  --video_backend ffmpeg --resume \
+  --model_dir /content/drive/MyDrive/SeedVR2/models \
+  --output /content/drive/MyDrive/SeedVR2/output/video.mp4
+~~~
+
+Each chunk is first written to a temporary file and then renamed, so a chunk is either complete or absent. Drive syncs in the background; wait for Drive to finish syncing before a planned stop.
+
+**Continuing after an interruption**
+
+1. Reconnect the runtime, re-mount Drive, and reinstall dependencies (the notebook's install cells).
+2. Run the **same command** again, unchanged, including `--resume`. Keep the same `--output`, `--resolution`, `--chunk_size`, `--temporal_overlap` and model options.
+3. The log shows `[RESUME] Resuming from frame N/M`. Completed chunks are kept; processing restarts at the first missing chunk (a chunk that is missing or empty ends the valid sequence; later ones are redone). With `--temporal_overlap`, the overlap frames are re-read from the source video.
+
+Caveats: the manifest does not record resolution or model settings, so changing them between runs mixes chunks of different quality or size. To start over, delete the `.<output name>_chunks` folder. Do not move or rename the output file between runs, because the folder name is derived from it.
+
+Also note:
+
+- Add `--resume` on the **first** run too. Without the flag no chunks are written, so there is nothing to resume from.
+- The checkpoint folder is hidden and the Colab file browser may not show it. Check it with `!ls -la /content/drive/MyDrive/SeedVR2/output/`. During a run it can also hold `.tmp_chunk_*.mp4`; assembly creates `.<name>.concat_list.txt` next to the output.
+- Nothing checks the manifest's `source` or `chunk_size` against the new run, and new chunks use the current `--chunk_size`. Resume with the same input, `--output`, resolution, model and `--chunk_size`.
+- Drive syncs asynchronously, so the most recent chunk may be lost on a sudden disconnect. It is simply redone on resume.
+
 ### Attention Backends & Pre-built FlashAttention-2 Installation
 
 SeedVR2-cli supports multiple attention backends (`--attention_mode`):

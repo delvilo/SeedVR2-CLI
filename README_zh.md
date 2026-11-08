@@ -23,9 +23,9 @@ SeedVR2 是基於 Linux 命令列的影像與影片超解析度放大工具。�
    - 視訊解碼升級為 Meta 官方 **`TorchCodec` (VideoDecoder)**，直接解碼為 PyTorch 張量，消除 OpenCV 逐幀讀取的 Python GIL 瓶頸與記憶體搬移開銷。
 
 4. **長影片斷點續傳支援（`--resume`）**：
-   - 專為 Google Colab 免費 T4 執行階段設計。每 33 幀自動保存獨立視訊分段檢查點與進度清冊。
-   - 若 Colab 閒置斷線或遭時長限制中斷，下次執行相同指令加上 `--resume` 即可自動跳過已完成的 Chunk，並自動由原片預讀時序尾巴無縫平滑接續。
-   - 全部 Chunk 完成後，透過 FFmpeg Concat Demuxer 在不到 1 秒內無損拼接為最終輸出，並完整保留原始音訊。
+   - 專為 Google Colab 免費 T4 執行階段設計。依 `--chunk_size`（建議明確指定，如 33）將影片切段，每段完成即保存為獨立 MP4 檢查點並更新進度清冊。**第一次執行就必須加上 `--resume`**，否則不會寫入任何檢查點。
+   - 若 Colab 閒置斷線或遭時長限制中斷，重新執行完全相同的指令即可自動跳過已完成的 Chunk，並自動由原片預讀時序尾巴無縫平滑接續。詳見下方「長影片中斷續傳」。
+   - 全部 Chunk 完成後，透過 FFmpeg Concat Demuxer 無損拼接（複製影像串流，不重新編碼），並嘗試從原片複製音訊（使用 `-shortest`）；若音訊混流失敗，會退回僅影像輸出。
 ---
 
 ## 模型最低 VRAM 需求表
@@ -105,6 +105,48 @@ python inference_cli.py media_folder/ \
 | `--debug` | 輸出詳細除錯訊息、時延分析與顯存即時監控數據。 |
 | `--resume` | 開啟長影片中斷續傳功能。自動掃描並接續已完成的分段檢查點，全片完成後 1 秒無損合併。 |
 | `--nvenc` | 開啟 NVIDIA GPU 硬體加速 H.265 編碼（hevc_nvenc），採用 P7 HQ 旗艦預設，輸出極速且接近視覺無損。 |
+
+### 長影片中斷續傳（`--resume`）
+
+`--resume` 僅適用於影片輸入且輸出為 MP4（PNG 輸出不支援）。**第一次執行就要加上**，並明確指定 `--chunk_size`（如 33），讓每次的切段邊界一致。
+
+**檔案位置**
+
+| 項目 | 位置 |
+| :--- | :--- |
+| 檢查點分段 | 輸出檔旁的隱藏資料夾 `<輸出目錄>/.<輸出檔名>_chunks/`，內含 `chunk_00001.mp4`…、處理中的 `.tmp_chunk_*.mp4` 與 `resume_manifest.json` |
+| 合併暫存 | 合併時在輸出檔旁產生 `.<檔名>.concat_list.txt` |
+| 最終影片 | `--output` 指定路徑 |
+| 模型權重 | `--model_dir` |
+
+隱藏資料夾在 Colab 檔案瀏覽器可能看不到，可用 `!ls -la /content/drive/MyDrive/SeedVR2/output/` 檢查。合併成功後檢查點資料夾會自動刪除；若最終輸出已存在且幀數不少於原片，則直接跳過。
+
+**Colab：先保存到 Google Drive**
+
+Colab 虛擬機磁碟在斷線後會被清空，因此要把 `--output`（檢查點資料夾隨之位於 Drive）與 `--model_dir` 都放在 Drive 上。
+
+~~~python
+from google.colab import drive
+drive.mount('/content/drive')
+~~~
+
+~~~bash
+python inference_cli.py /content/drive/MyDrive/SeedVR2/input/video.mp4 \
+  --resolution 1080 --batch_size 5 --chunk_size 33 --temporal_overlap 3 \
+  --video_backend ffmpeg --resume \
+  --model_dir /content/drive/MyDrive/SeedVR2/models \
+  --output /content/drive/MyDrive/SeedVR2/output/video.mp4
+~~~
+
+每個分段先寫入暫存檔再改名，因此分段不是完整就是不存在。Drive 為非同步同步，突然斷線時最新的分段可能遺失，續跑時會重做。
+
+**中斷後如何繼續**
+
+1. 重新連線執行階段、重新掛載 Drive、重新安裝相依套件（筆記本的安裝儲存格）。
+2. **原封不動**再執行同一條指令（含 `--resume`），輸入、`--output`、`--resolution`、`--chunk_size`、`--temporal_overlap` 與模型參數都要相同。
+3. log 會顯示 `[RESUME] Resuming from frame N/M`。已完成的分段會保留，從第一個缺少或空白的分段重新開始（其後的分段會重做）；使用 `--temporal_overlap` 時，重疊幀會從原片重新讀取。
+
+注意：程式不會檢查清冊中的來源、解析度、模型或 `chunk_size` 是否與本次相符，新分段一律採用本次的 `--chunk_size`，參數不同會混入不同品質或尺寸的分段。要重新開始請刪除 `.<輸出檔名>_chunks` 資料夾；也不要在兩次執行之間移動或改名輸出檔，因為資料夾名稱由輸出檔名決定。
 
 ### 注意力機制與預編譯 FlashAttention-2 安裝指令
 
